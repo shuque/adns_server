@@ -9,8 +9,8 @@
 import getopt, os, os.path, sys, pwd, grp
 import struct, socket, select, errno, threading
 from binascii import hexlify
-import dns.message, dns.rdatatype, dns.rcode, dns.flags, dns.query, dns.edns
-import dns.zone
+import dns.zone, dns.name, dns.message, dns.flags, dns.rcode
+import dns.rdatatype, dns.rdataclass, dns.query, dns.edns
 
 
 class Prefs:
@@ -273,19 +273,20 @@ class DNSresponse:
             response.use_edns(edns=False)
         qname = self.query.message.question[0].name
         qtype = self.query.message.question[0].rdtype
+        qclass = self.query.message.question[0].rdclass
+
+        if qclass != dns.rdataclass.IN:
+            response.set_rcode(dns.rcode.REFUSED)
+            return response
 
         if not qname.is_subdomain(z.zone.origin):
             response.set_rcode(dns.rcode.REFUSED)
             return response
 
-        response.flags |= dns.flags.AA
-
         self.find_answers(qname, qtype)
+        response.flags |= dns.flags.AA
+        response.set_rcode(self.rcode)
         response.answer = self.answer_rrsets
-
-        if self.rcode == dns.rcode.NXDOMAIN:
-            response.set_rcode(dns.rcode.NXDOMAIN)
-
         if not self.answer_resolved:
             response.authority = [self.soa_rr()]
 
