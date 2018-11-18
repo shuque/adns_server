@@ -213,7 +213,7 @@ class DNSresponse:
             rrs = z.find_node(qname)
         except KeyError:
             response.set_rcode(dns.rcode.NXDOMAIN)
-            soa = z.find_rrset(z.origin, 6)
+            soa = z.find_rrset(z.origin, dns.rdatatype.SOA)
             response.authority = [soa]
             return response
         try:
