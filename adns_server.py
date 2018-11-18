@@ -234,6 +234,9 @@ class DNSresponse:
             msglen = struct.pack('!H', len(self.wire_message))
             self.wire_message = msglen + self.wire_message
 
+    def soa_rr(self):
+        return z.zone.find_rrset(z.zone.origin, dns.rdatatype.SOA)
+
     def make_response(self):
 
         response = dns.message.make_response(self.query.message)
@@ -246,18 +249,17 @@ class DNSresponse:
             response.set_rcode(dns.rcode.REFUSED)
             return response
 
-        response.flags |= dns.flags.AA            # set AA=1
+        response.flags |= dns.flags.AA                     # set AA=1
         if qname not in z.all_nodes:
-            response.set_rcode(dns.rcode.NXDOMAIN)
-            soa = z.zone.find_rrset(z.zone.origin, dns.rdatatype.SOA)
-            response.authority = [soa]
+            response.set_rcode(dns.rcode.NXDOMAIN)         # NXDOMAIN
+            response.authority = [self.soa_rr()]
             return response
         try:
             rrs = z.zone.find_rrset(qname, qtype)
         except KeyError:
-            pass                                  # NODATA
+            response.authority = [self.soa_rr()]           # NODATA
         else:
-            response.answer = [rrs]
+            response.answer = [rrs]                        # Answer
 
         return response
 
