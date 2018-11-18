@@ -7,13 +7,13 @@ behavior of some other implementation that exhibits some problem).
 
 ### Notes
 
-* dnspython's dns.zone.find_node() gives wrong result for empty
-  non terminals, sigh. This is a consequence of the fact that the
-  zone structure is composed of a python dictionary keyed only
-  by names with associated RRsets. TODO: to workaround this, I'll
-  have to either use my own different tree-like data structure,
-  or add one on top of dns.zone that allows me to efficiently
-  search for all nodes including ENTs.
+* dnspython's dns.zone.find_node() gives the wrong result for empty non
+  terminals, sigh. This is a consequence of the fact that the zone structure
+  is composed of a python dictionary keyed only by names with associated RRsets.
+  To workaround this, I use a wrapper class (Zone) that contains an additional
+  dictionary that contains _all_ names in the zone, including empty non-
+  terminals. Longer term, I'll probably implement a tree data structure to
+  hold the zone nodes.
 
 ### TODO list
 
@@ -24,5 +24,5 @@ behavior of some other implementation that exhibits some problem).
 * Non IN class --> return REFUSED
 * Support DNSSEC
 * Handle CNAMEs
-* Add a tree datastructure on top of dns.zone to deal with ENT properly
 * Support multiple zones
+* Support child zone delegations

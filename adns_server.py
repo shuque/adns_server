@@ -161,6 +161,45 @@ def recvSocket(s, numOctets):
     return response
 
 
+def add_dict_key(d, k):
+    """Add key k to dictionary d, if not already present"""
+    if k not in d:
+        d[k] = 1
+
+
+class Zone:
+    """
+    Zone object: contains a dns.zone.Zone object along with an
+    additional dictionary containing all node names. The dns.zone
+    module's find_node() method returns the wrong results for
+    empty non-terminals.
+    """
+
+    def __init__(self, filename):
+        self.filename = filename
+        self.zone = dns.zone.from_file(filename, relativize=False)
+        self.all_nodes = self.get_all_nodes()
+
+    def get_all_nodes(self):
+        """Return dictionary of all names _including_ empty non-terminals"""
+
+        all_nodes = {}
+        for name, node in self.zone.items():
+            add_dict_key(all_nodes, name)
+            if name == self.zone.origin:
+                continue
+            inZone = True
+            n = name
+            while inZone:
+                p = n.parent()
+                if p == self.zone.origin:
+                    inZone = False
+                else:
+                    add_dict_key(all_nodes, p)
+                    n = p
+        return all_nodes
+
+
 class DNSquery:
     """DNS query object"""
 
@@ -186,13 +225,12 @@ class DNSquery:
 class DNSresponse:
     """DNS response object"""
 
-    def __init__(self, query, tcp=False):
+    def __init__(self, query):
 
         self.query = query
-        self.tcp = tcp
         self.message = self.make_response()
         self.wire_message = self.message.to_wire()
-        if self.tcp:
+        if self.query.tcp:
             msglen = struct.pack('!H', len(self.wire_message))
             self.wire_message = msglen + self.wire_message
 
@@ -204,20 +242,18 @@ class DNSresponse:
         qname = self.query.message.question[0].name
         qtype = self.query.message.question[0].rdtype
 
-        if not qname.is_subdomain(z.origin):
+        if not qname.is_subdomain(z.zone.origin):
             response.set_rcode(dns.rcode.REFUSED)
             return response
 
         response.flags |= dns.flags.AA            # set AA=1
-        try:
-            rrs = z.find_node(qname)
-        except KeyError:
+        if qname not in z.all_nodes:
             response.set_rcode(dns.rcode.NXDOMAIN)
-            soa = z.find_rrset(z.origin, dns.rdatatype.SOA)
+            soa = z.zone.find_rrset(z.zone.origin, dns.rdatatype.SOA)
             response.authority = [soa]
             return response
         try:
-            rrs = z.find_rrset(qname, qtype)
+            rrs = z.zone.find_rrset(qname, qtype)
         except KeyError:
             pass                                  # NODATA
         else:
@@ -228,17 +264,21 @@ class DNSresponse:
 
 def handle_query(query, sock):
     dprint("RECEIVE QUERY:\n%s" % query.message)
-    if query.message:
-        response = DNSresponse(query)
-        if response.message:
-            dprint("SEND RESPONSE:\n%s" % response.message)
-            dprint(hexlify(response.wire_message))
-            if query.tcp:
-                sendSocket(sock, response.wire_message)
-                sock.close()
-            else:
-                sock.sendto(response.wire_message,
-                            (query.cliaddr, query.cliport))
+
+    if not query.message:
+        return
+
+    response = DNSresponse(query)
+    if not response.message:
+        return
+
+    dprint("SEND RESPONSE:\n%s" % response.message)
+    dprint(hexlify(response.wire_message))
+    if query.tcp:
+        sendSocket(sock, response.wire_message)
+    else:
+        sock.sendto(response.wire_message,
+                    (query.cliaddr, query.cliport))
 
 
 def handle_connection_udp(sock, rbufsize=2048):
@@ -257,15 +297,20 @@ def handle_connection_tcp(sock, addr, rbufsize=2048):
            (cliaddr, cliport, len(data)))
     q = DNSquery(data, cliaddr=cliaddr, cliport=cliport, tcp=True)
     handle_query(q, sock)
+    sock.close()
+
+def load_zone(zonefile):
+    z_ent = {}
+    z = dns.zone.from_file(zonefile, relativize=False)
+    return z, z_ent
 
 
 if __name__ == '__main__':
 
     process_args(sys.argv[1:])
 
-    z = dns.zone.from_file(Prefs.ZONEFILE, relativize=False)
-    zname = z.origin
-    print("Serving DNS zone: %s" % zname)
+    z = Zone(Prefs.ZONEFILE)
+    print("Serving DNS zone: %s" % z.zone.origin)
 
     fd_read = []
 
