@@ -228,6 +228,9 @@ class DNSresponse:
     def __init__(self, query):
 
         self.query = query
+        self.answer_rrsets = []
+        self.answer_resolved = False
+        self.rcode = dns.rcode.NOERROR
         self.message = self.make_response()
         self.wire_message = self.message.to_wire()
         if self.query.tcp:
@@ -236,6 +239,32 @@ class DNSresponse:
 
     def soa_rr(self):
         return z.zone.find_rrset(z.zone.origin, dns.rdatatype.SOA)
+
+    def find_answers(self, qname, qtype):
+        Done = False
+        while not Done:
+            if qname not in z.all_nodes:
+                self.rcode = dns.rcode.NXDOMAIN
+                return
+            try:
+                rrs = z.zone.find_rrset(qname, qtype)
+            except KeyError:
+                try:
+                    rrs = z.zone.find_rrset(qname, dns.rdatatype.CNAME)
+                except KeyError:
+                    return
+                else:
+                    cname = rrs[0].target
+                    self.answer_rrsets.append(rrs)
+                    if cname.is_subdomain(z.zone.origin):
+                        qname = cname
+                    else:
+                        self.answer_resolved = True
+                        Done = True
+            else:
+                self.answer_rrsets.append(rrs)
+                self.answer_resolved = True
+                Done = True
 
     def make_response(self):
 
@@ -249,17 +278,16 @@ class DNSresponse:
             response.set_rcode(dns.rcode.REFUSED)
             return response
 
-        response.flags |= dns.flags.AA                     # set AA=1
-        if qname not in z.all_nodes:
-            response.set_rcode(dns.rcode.NXDOMAIN)         # NXDOMAIN
+        response.flags |= dns.flags.AA
+
+        self.find_answers(qname, qtype)
+        response.answer = self.answer_rrsets
+
+        if self.rcode == dns.rcode.NXDOMAIN:
+            response.set_rcode(dns.rcode.NXDOMAIN)
+
+        if not self.answer_resolved:
             response.authority = [self.soa_rr()]
-            return response
-        try:
-            rrs = z.zone.find_rrset(qname, qtype)
-        except KeyError:
-            response.authority = [self.soa_rr()]           # NODATA
-        else:
-            response.answer = [rrs]                        # Answer
 
         return response
 

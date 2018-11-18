@@ -17,11 +17,12 @@ behavior of some other implementation that exhibits some problem).
 
 ### TODO list
 
-* Support daemon mode (in addition to remain attached to foreground mode)
+* Support daemon mode (in addition to foreground mode)
 * Access control
 * Support Zone Transfer
 * Non IN class --> return REFUSED
+* Logging
 * Support DNSSEC
-* Handle CNAMEs
+* Handle DNAME
 * Support multiple zones
 * Support child zone delegations
