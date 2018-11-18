@@ -17,7 +17,6 @@ behavior of some other implementation that exhibits some problem).
 
 ### TODO list
 
-* Port to Python3
 * Support daemon mode (in addition to remain attached to foreground mode)
 * Access control
 * Support Zone Transfer
