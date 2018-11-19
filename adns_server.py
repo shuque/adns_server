@@ -169,35 +169,37 @@ def add_dict_key(d, k):
 
 class Zone:
     """
-    Zone object: contains a dns.zone.Zone object along with an
-    additional dictionary containing all node names. The dns.zone
-    module's find_node() method returns the wrong results for
-    empty non-terminals.
+    Zone object: contains a dns.zone.Zone object, modified to include
+    all empty non-terminals as explicit nodes. Otherwise, the dns.zone
+    module's find_node() method returns the wrong results for empty
+    non-terminals.
     """
 
     def __init__(self, filename):
         self.filename = filename
         self.zone = dns.zone.from_file(filename, relativize=False)
-        self.all_nodes = self.get_all_nodes()
+        self.add_nodes(self.get_ent_nodes())
 
-    def get_all_nodes(self):
-        """Return dictionary of all names _including_ empty non-terminals"""
-
-        all_nodes = {}
+    def get_ent_nodes(self):
+        ent_nodes = {}
         for name, node in self.zone.items():
-            add_dict_key(all_nodes, name)
             if name == self.zone.origin:
                 continue
-            inZone = True
             n = name
-            while inZone:
+            while True:
                 p = n.parent()
                 if p == self.zone.origin:
-                    inZone = False
-                else:
-                    add_dict_key(all_nodes, p)
-                    n = p
-        return all_nodes
+                    break
+                try:
+                    _ = self.zone.find_node(p)
+                except KeyError:
+                    add_dict_key(ent_nodes, p)
+                n = p
+        return ent_nodes
+
+    def add_nodes(self, nodelist):
+        for entry in nodelist:
+            _ = self.zone.find_node(entry, create=True)
 
 
 class DNSquery:
@@ -243,7 +245,9 @@ class DNSresponse:
     def find_answers(self, qname, qtype):
         Done = False
         while not Done:
-            if qname not in z.all_nodes:
+            try:
+                z.zone.find_node(qname)
+            except KeyError:
                 self.rcode = dns.rcode.NXDOMAIN
                 return
             try:
