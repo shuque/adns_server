@@ -334,11 +334,6 @@ def handle_connection_tcp(sock, addr, rbufsize=2048):
     handle_query(q, sock)
     sock.close()
 
-def load_zone(zonefile):
-    z_ent = {}
-    z = dns.zone.from_file(zonefile, relativize=False)
-    return z, z_ent
-
 
 if __name__ == '__main__':
 
