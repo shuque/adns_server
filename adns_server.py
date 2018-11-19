@@ -190,16 +190,14 @@ class Zone:
                 p = n.parent()
                 if p == self.zone.origin:
                     break
-                try:
-                    _ = self.zone.find_node(p)
-                except KeyError:
+                if not self.zone.get_node(p):
                     add_dict_key(ent_nodes, p)
                 n = p
         return ent_nodes
 
     def add_nodes(self, nodelist):
         for entry in nodelist:
-            _ = self.zone.find_node(entry, create=True)
+            _ = self.zone.get_node(entry, create=True)
 
 
 class DNSquery:
@@ -245,30 +243,25 @@ class DNSresponse:
     def find_answers(self, qname, qtype):
         Done = False
         while not Done:
-            try:
-                z.zone.find_node(qname)
-            except KeyError:
+            if not z.zone.get_node(qname):
                 self.rcode = dns.rcode.NXDOMAIN
                 return
-            try:
-                rrs = z.zone.find_rrset(qname, qtype)
-            except KeyError:
-                try:
-                    rrs = z.zone.find_rrset(qname, dns.rdatatype.CNAME)
-                except KeyError:
-                    return
-                else:
-                    cname = rrs[0].target
-                    self.answer_rrsets.append(rrs)
-                    if cname.is_subdomain(z.zone.origin):
-                        qname = cname
-                    else:
-                        self.answer_resolved = True
-                        Done = True
-            else:
+            rrs = z.zone.get_rrset(qname, qtype)
+            if rrs:
                 self.answer_rrsets.append(rrs)
                 self.answer_resolved = True
-                Done = True
+                return
+            else:
+                rrs = z.zone.get_rrset(qname, dns.rdatatype.CNAME)
+                if not rrs:
+                    return
+                cname = rrs[0].target
+                self.answer_rrsets.append(rrs)
+                if cname.is_subdomain(z.zone.origin):
+                    qname = cname
+                else:
+                    self.answer_resolved = True
+                    Done = True
 
     def make_response(self):
 
