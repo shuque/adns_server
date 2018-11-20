@@ -238,7 +238,7 @@ class DNSresponse:
             self.wire_message = msglen + self.wire_message
 
     def soa_rr(self):
-        return z.zone.find_rrset(z.zone.origin, dns.rdatatype.SOA)
+        return z.zone.get_rrset(z.zone.origin, dns.rdatatype.SOA)
 
     def find_answers(self, qname, qtype):
         Done = False
