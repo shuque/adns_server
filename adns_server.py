@@ -190,7 +190,7 @@ class Zone:
                 p = n.parent()
                 if p == self.zone.origin:
                     break
-                if not self.zone.get_node(p):
+                if self.zone.get_node(p) is None:
                     add_dict_key(ent_nodes, p)
                 n = p
         return ent_nodes
@@ -218,7 +218,7 @@ class DNSquery:
         try:
             self.message = dns.message.from_wire(self.wire_message)
         except Exception as e:
-            dprint("BAD QUERY: %s: %s" % (str(type(e)), e.message))
+            dprint("Unable to Parse Query: %s: %s" % (str(type(e)), e.message))
             self.message = None
 
 
@@ -240,15 +240,35 @@ class DNSresponse:
     def soa_rr(self):
         return z.zone.get_rrset(z.zone.origin, dns.rdatatype.SOA)
 
-    def find_answers(self, qname, qtype):
-        Done = False
-        while not Done:
-            if not z.zone.get_node(qname):
-                self.rcode = dns.rcode.NXDOMAIN
-                return
-            rrs = z.zone.get_rrset(qname, qtype)
-            if rrs:
-                self.answer_rrsets.append(rrs)
+    def closest_encloser(self, qname):
+        node = qname.parent()
+        while True:
+            if z.zone.get_node(node) is not None:
+                return node
+            else:
+                node = dns.name.Name(node.labels[1:])
+
+    def find_wildcard(self, qname):
+        wildcard = dns.name.Name((b'*',) + self.closest_encloser(qname).labels)
+        if z.zone.get_node(wildcard) is not None:
+            return wildcard
+
+    def find_answers(self, qname, qtype, orig_qname=None):
+
+        while True:
+            if z.zone.get_node(qname) is None:
+                wildcard = self.find_wildcard(qname)
+                if wildcard is not None:
+                    return self.find_answers(wildcard, qtype, orig_qname=qname)
+                else:
+                    self.rcode = dns.rcode.NXDOMAIN
+                    return
+            rdataset = z.zone.get_rdataset(qname, qtype)
+            if rdataset:
+                owner = orig_qname if orig_qname is not None else qname
+                rrset = dns.rrset.RRset(owner, dns.rdataclass.IN, qtype)
+                rrset.update(rdataset)
+                self.answer_rrsets.append(rrset)
                 self.answer_resolved = True
                 return
             else:
@@ -261,7 +281,7 @@ class DNSresponse:
                     qname = cname
                 else:
                     self.answer_resolved = True
-                    Done = True
+                    return
 
     def make_response(self):
 

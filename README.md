@@ -18,7 +18,6 @@ behavior of some other implementation that exhibits some problem).
 ### TODO list
 
 * Support daemon mode (in addition to foreground mode)
-* Handle wildcards
 * Handle EDNS
 * Handle DNAME
 * Support Zone Transfer
