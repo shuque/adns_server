@@ -252,21 +252,23 @@ class DNSresponse:
         wildcard = dns.name.Name((b'*',) + self.closest_encloser(qname).labels)
         if z.zone.get_node(wildcard) is not None:
             return wildcard
+        else:
+            return None
 
-    def find_answers(self, qname, qtype, orig_qname=None):
+    def find_answers(self, qname, qtype, wild=False):
 
         while True:
             if z.zone.get_node(qname) is None:
                 wildcard = self.find_wildcard(qname)
                 if wildcard is not None:
-                    return self.find_answers(wildcard, qtype, orig_qname=qname)
+                    return self.find_answers(wildcard, qtype, wild=True)
                 else:
                     self.rcode = dns.rcode.NXDOMAIN
                     return
             rdataset = z.zone.get_rdataset(qname, qtype)
             if rdataset:
-                owner = orig_qname if orig_qname is not None else qname
-                rrset = dns.rrset.RRset(owner, dns.rdataclass.IN, qtype)
+                owner = self.qname if wild else qname
+                rrset = dns.rrset.RRset(owner, self.qclass, qtype)
                 rrset.update(rdataset)
                 self.answer_rrsets.append(rrset)
                 self.answer_resolved = True
@@ -288,19 +290,19 @@ class DNSresponse:
         response = dns.message.make_response(self.query.message)
         if Prefs.NO_EDNS:
             response.use_edns(edns=False)
-        qname = self.query.message.question[0].name
-        qtype = self.query.message.question[0].rdtype
-        qclass = self.query.message.question[0].rdclass
+        self.qname = self.query.message.question[0].name
+        self.qtype = self.query.message.question[0].rdtype
+        self.qclass = self.query.message.question[0].rdclass
 
-        if qclass != dns.rdataclass.IN:
+        if self.qclass != dns.rdataclass.IN:
             response.set_rcode(dns.rcode.REFUSED)
             return response
 
-        if not qname.is_subdomain(z.zone.origin):
+        if not self.qname.is_subdomain(z.zone.origin):
             response.set_rcode(dns.rcode.REFUSED)
             return response
 
-        self.find_answers(qname, qtype)
+        self.find_answers(self.qname, self.qtype)
         response.flags |= dns.flags.AA
         response.set_rcode(self.rcode)
         response.answer = self.answer_rrsets
