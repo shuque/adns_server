@@ -274,11 +274,14 @@ class DNSresponse:
                 self.answer_resolved = True
                 return
             else:
-                rrs = z.zone.get_rrset(qname, dns.rdatatype.CNAME)
-                if not rrs:
+                rdataset = z.zone.get_rdataset(qname, dns.rdatatype.CNAME)
+                if not rdataset:
                     return
-                cname = rrs[0].target
-                self.answer_rrsets.append(rrs)
+                owner = self.qname if wild else qname
+                rrset = dns.rrset.RRset(owner, self.qclass, dns.rdatatype.CNAME)
+                rrset.update(rdataset)
+                self.answer_rrsets.append(rrset)
+                cname = rdataset[0].target
                 if cname.is_subdomain(z.zone.origin):
                     qname = cname
                 else:
