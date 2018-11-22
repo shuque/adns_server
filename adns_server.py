@@ -275,7 +275,6 @@ class DNSresponse:
             l = remaining_labels[0]
             remaining_labels = remaining_labels[1:]
             candidate = dns.name.Name((l,) + candidate.labels)
-            print("Search DNAME at:", candidate)
             rdataset = z.zone.get_rdataset(candidate, dns.rdatatype.DNAME)
             if rdataset:
                 dname = rdataset[0].target
