@@ -268,9 +268,8 @@ class DNSresponse:
         return
 
     def find_dname(self, qname):
-        labels = qname.relativize(z.zone.origin)[::-1]
+        remaining_labels = qname.relativize(z.zone.origin)[::-1]
         candidate = z.zone.origin
-        remaining_labels = labels
         while remaining_labels:
             if candidate == qname:
                 return False
