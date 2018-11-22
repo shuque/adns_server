@@ -19,7 +19,6 @@ behavior of some other implementation that exhibits some problem).
 
 * Support daemon mode (in addition to foreground mode)
 * Handle EDNS
-* Handle DNAME
 * Support Zone Transfer
 * Better Logging options
 * Support DNSSEC

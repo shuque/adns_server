@@ -255,10 +255,47 @@ class DNSresponse:
         else:
             return None
 
+    def synthesize_cname(self, qname, labels, dname, dname_rdataset):
+        cname = dns.name.Name(labels[::-1] + dname.labels)
+        rrset = dns.rrset.RRset(qname, self.qclass, dns.rdatatype.CNAME)
+        rdataset = dns.rdataset.Rdataset(self.qclass, dns.rdatatype.CNAME)
+        rdataset.update_ttl(dname_rdataset.ttl)
+        cname_rdata = dns.rdtypes.ANY.CNAME.CNAME(dns.rdataclass.IN,
+                                                  dns.rdatatype.CNAME, cname)
+        rdataset.add(cname_rdata)
+        rrset.update(rdataset)
+        self.answer_rrsets.append(rrset)
+        return
+
+    def find_dname(self, qname):
+        dprint("ENTER find_dname() ..")
+        labels = qname.relativize(z.zone.origin)[::-1]
+        candidate = z.zone.origin
+        remaining_labels = labels
+        while remaining_labels:
+            print("Remaining labels", remaining_labels)
+            l = remaining_labels[0]
+            remaining_labels = remaining_labels[1:]
+            candidate = dns.name.Name((l,) + candidate.labels)
+            print("Search DNAME at:", candidate)
+            rdataset = z.zone.get_rdataset(candidate, dns.rdatatype.DNAME)
+            if rdataset:
+                dname = rdataset[0].target
+                rrset = dns.rrset.RRset(candidate, self.qclass, dns.rdatatype.DNAME)
+                rrset.update(rdataset)
+                self.answer_rrsets.append(rrset)
+                self.synthesize_cname(qname, remaining_labels, dname, rdataset)
+                self.answer_resolved = True
+                return True
+        else:
+            return False
+
     def find_answers(self, qname, qtype, wild=False):
 
         while True:
             if z.zone.get_node(qname) is None:
+                if self.find_dname(qname):
+                    return
                 wildcard = self.find_wildcard(qname)
                 if wildcard is not None:
                     return self.find_answers(wildcard, qtype, wild=True)
