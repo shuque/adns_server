@@ -272,9 +272,6 @@ class DNSresponse:
         candidate = z.zone.origin
         remaining_labels = labels
         while remaining_labels:
-            l = remaining_labels[0]
-            remaining_labels = remaining_labels[1:]
-            candidate = dns.name.Name((l,) + candidate.labels)
             if candidate == qname:
                 return False
             rdataset = z.zone.get_rdataset(candidate, dns.rdatatype.DNAME)
@@ -286,6 +283,9 @@ class DNSresponse:
                 self.synthesize_cname(qname, remaining_labels, dname, rdataset)
                 self.answer_resolved = True
                 return True
+            l = remaining_labels[0]
+            remaining_labels = remaining_labels[1:]
+            candidate = dns.name.Name((l,) + candidate.labels)
         else:
             return False
 
