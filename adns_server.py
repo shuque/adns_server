@@ -268,12 +268,10 @@ class DNSresponse:
         return
 
     def find_dname(self, qname):
-        dprint("ENTER find_dname() ..")
         labels = qname.relativize(z.zone.origin)[::-1]
         candidate = z.zone.origin
         remaining_labels = labels
         while remaining_labels:
-            print("Remaining labels", remaining_labels)
             l = remaining_labels[0]
             remaining_labels = remaining_labels[1:]
             candidate = dns.name.Name((l,) + candidate.labels)
