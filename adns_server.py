@@ -353,6 +353,30 @@ def handle_connection_tcp(sock, addr, rbufsize=2048):
     sock.close()
 
 
+def setup_sockets(family, server, port):
+
+    fd_read = []
+    dispatch = {}
+
+    if family is None or family == 'IPv4':
+        s_udp4 = udp4socket(server, port)
+        fd_read.append(s_udp4.fileno())
+        dispatch[s_udp4] = (handle_connection_udp, False)
+        s_tcp4 = tcp4socket(server, port)
+        fd_read.append(s_tcp4.fileno())
+        dispatch[s_tcp4] = (handle_connection_tcp, True)
+
+    if family is None or family == 'IPv6':
+        s_udp6 = udp6socket(server, port)
+        fd_read.append(s_udp6.fileno())
+        dispatch[s_udp6] = (handle_connection_udp, False)
+        s_tcp6 = tcp6socket(server, port)
+        fd_read.append(s_tcp6.fileno())
+        dispatch[s_tcp6] = (handle_connection_tcp, True)
+
+    return fd_read, dispatch
+
+
 if __name__ == '__main__':
 
     process_args(sys.argv[1:])
@@ -360,19 +384,7 @@ if __name__ == '__main__':
     z = Zone(Prefs.ZONEFILE)
     print("Serving DNS zone: %s" % z.zone.origin)
 
-    fd_read = []
-
-    if Prefs.SERVER_AF is None or Prefs.SERVER_AF == 'IPv4':
-        s_udp4 = udp4socket(Prefs.SERVER, Prefs.PORT)
-        fd_read.append(s_udp4.fileno())
-        s_tcp4 = tcp4socket(Prefs.SERVER, Prefs.PORT)
-        fd_read.append(s_tcp4.fileno())
-
-    if Prefs.SERVER_AF is None or Prefs.SERVER_AF == 'IPv6':
-        s_udp6 = udp6socket(Prefs.SERVER, Prefs.PORT)
-        fd_read.append(s_udp6.fileno())
-        s_tcp6 = tcp6socket(Prefs.SERVER, Prefs.PORT)
-        fd_read.append(s_tcp6.fileno())
+    fd_read, dispatch = setup_sockets(Prefs.SERVER_AF, Prefs.SERVER, Prefs.PORT)
 
     drop_privs()
 
@@ -396,24 +408,16 @@ if __name__ == '__main__':
 
         if ready_r:
             for fd in ready_r:
-
-                if Prefs.SERVER_AF is None or Prefs.SERVER_AF == 'IPv4':
-                    if fd == s_tcp4.fileno():
-                        s_conn4, addr = s_tcp4.accept()
-                        threading.Thread(target=handle_connection_tcp, 
-                                         args=(s_conn4, addr)).start()
-                    elif fd == s_udp4.fileno():
-                        threading.Thread(target=handle_connection_udp, 
-                                         args=(s_udp4,)).start()
-
-                if Prefs.SERVER_AF is None or Prefs.SERVER_AF == 'IPv6':
-                    if fd == s_tcp6.fileno():
-                        s_conn6, addr = s_tcp6.accept()
-                        threading.Thread(target=handle_connection_tcp, 
-                                         args=(s_conn6, addr)).start()
-                    elif fd == s_udp6.fileno():
-                        threading.Thread(target=handle_connection_udp, 
-                                         args=(s_udp6,)).start()
+                for s in dispatch:
+                    if fd == s.fileno():
+                        handler, tcp = dispatch[s]
+                        if tcp:
+                            conn, addr = s.accept()
+                            threading.Thread(target=handler,
+                                             args=(conn, addr)).start()
+                        else:
+                            threading.Thread(target=handler,
+                                             args=(s,)).start()
 
         # Do something in the main thread here if needed
         #dprint("Heartbeat.")
