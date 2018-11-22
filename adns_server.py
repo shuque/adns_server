@@ -275,6 +275,8 @@ class DNSresponse:
             l = remaining_labels[0]
             remaining_labels = remaining_labels[1:]
             candidate = dns.name.Name((l,) + candidate.labels)
+            if candidate == qname:
+                return False
             rdataset = z.zone.get_rdataset(candidate, dns.rdatatype.DNAME)
             if rdataset:
                 dname = rdataset[0].target
@@ -289,10 +291,11 @@ class DNSresponse:
 
     def find_answers(self, qname, qtype, wild=False):
 
+        if self.find_dname(qname):
+            return
+
         while True:
             if z.zone.get_node(qname) is None:
-                if self.find_dname(qname):
-                    return
                 wildcard = self.find_wildcard(qname)
                 if wildcard is not None:
                     return self.find_answers(wildcard, qtype, wild=True)
