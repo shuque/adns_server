@@ -255,7 +255,8 @@ class DNSresponse:
         else:
             return None
 
-    def synthesize_cname(self, qname, labels, dname, dname_rdataset):
+    def synthesize_cname(self, qname, labels, dname_rdataset):
+        dname = dname_rdataset[0].target
         try:
             cname = dns.name.Name(labels[::-1] + dname.labels)
         except dns.name.NameTooLong:
@@ -279,11 +280,10 @@ class DNSresponse:
         while remaining_labels and (candidate != qname):
             rdataset = z.zone.get_rdataset(candidate, dns.rdatatype.DNAME)
             if rdataset:
-                dname = rdataset[0].target
                 rrset = dns.rrset.RRset(candidate, self.qclass, dns.rdatatype.DNAME)
                 rrset.update(rdataset)
                 self.answer_rrsets.append(rrset)
-                self.synthesize_cname(qname, remaining_labels, dname, rdataset)
+                self.synthesize_cname(qname, remaining_labels, rdataset)
                 self.answer_resolved = True
                 return True
             l = remaining_labels[0]
