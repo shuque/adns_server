@@ -256,7 +256,11 @@ class DNSresponse:
             return None
 
     def synthesize_cname(self, qname, labels, dname, dname_rdataset):
-        cname = dns.name.Name(labels[::-1] + dname.labels)
+        try:
+            cname = dns.name.Name(labels[::-1] + dname.labels)
+        except dns.name.NameTooLong:
+            self.rcode = dns.rcode.YXDOMAIN
+            return
         rrset = dns.rrset.RRset(qname, self.qclass, dns.rdatatype.CNAME)
         rdataset = dns.rdataset.Rdataset(self.qclass, dns.rdatatype.CNAME)
         rdataset.update_ttl(dname_rdataset.ttl)
@@ -265,14 +269,14 @@ class DNSresponse:
         rdataset.add(cname_rdata)
         rrset.update(rdataset)
         self.answer_rrsets.append(rrset)
+        if cname.is_subdomain(z.zone.origin):
+            self.find_answers(cname, self.qtype)
         return
 
     def find_dname(self, qname):
         remaining_labels = qname.relativize(z.zone.origin)[::-1]
         candidate = z.zone.origin
-        while remaining_labels:
-            if candidate == qname:
-                return False
+        while remaining_labels and (candidate != qname):
             rdataset = z.zone.get_rdataset(candidate, dns.rdatatype.DNAME)
             if rdataset:
                 dname = rdataset[0].target
@@ -287,6 +291,17 @@ class DNSresponse:
             candidate = dns.name.Name((l,) + candidate.labels)
         else:
             return False
+
+    def find_cname(self, name, wild=False):
+        rdataset = z.zone.get_rdataset(name, dns.rdatatype.CNAME)
+        if not rdataset:
+            return None
+        owner = self.qname if wild else name
+        rrset = dns.rrset.RRset(owner, self.qclass, dns.rdatatype.CNAME)
+        rrset.update(rdataset)
+        self.answer_rrsets.append(rrset)
+        cname = rdataset[0].target
+        return cname
 
     def find_answers(self, qname, qtype, wild=False):
 
@@ -310,14 +325,9 @@ class DNSresponse:
                 self.answer_resolved = True
                 return
             else:
-                rdataset = z.zone.get_rdataset(qname, dns.rdatatype.CNAME)
-                if not rdataset:
+                cname = self.find_cname(qname, wild)
+                if not cname:
                     return
-                owner = self.qname if wild else qname
-                rrset = dns.rrset.RRset(owner, self.qclass, dns.rdatatype.CNAME)
-                rrset.update(rdataset)
-                self.answer_rrsets.append(rrset)
-                cname = rdataset[0].target
                 if cname.is_subdomain(z.zone.origin):
                     qname = cname
                 else:

@@ -7,13 +7,14 @@ behavior of some other implementation that exhibits some problem).
 
 ### Notes
 
-* dnspython's dns.zone.find_node() gives the wrong result for empty non
-  terminals, sigh. This is a consequence of the fact that the zone structure
-  is composed of a python dictionary keyed only by names with associated RRsets.
-  To workaround this, I use a wrapper class (Zone) that modifies the zone
-  object to explicitly include all the empty non-terminals as explicit nodes.
-  When I have time, I'll probably implement a tree data structure to hold
-  the zone nodes.
+* dnspython's dns.zone.Zone class uses a python dictionary (i.e. hash table)
+  to store DNS nodes, and furthermore only stores nodes with associated
+  RRsets. This makes it very inefficient for certain important tasks, such
+  as locating empty non-terminals and DNAME records. To partially workaround
+  this, I use a wrapper class (Zone) that modifies the zone object to
+  explicitly search for and include all the empty non-terminals as explicit
+  nodes. In some future version of this program, I will re-implement the
+  zone with an actual tree data structure.
 
 ### TODO list
 
