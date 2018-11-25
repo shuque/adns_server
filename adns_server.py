@@ -15,12 +15,12 @@ import dns.rdatatype, dns.rdataclass, dns.query, dns.edns
 
 class Prefs:
     """Preferences"""
-    DEBUG      = False                # -d: Print debugging output?
-    SERVER     = ""                   # -s: server listening address
+    DEBUG      = False                # -d: Print debugging output
+    SERVER     = ''                   # -s: server listening address
     SERVER_AF  = None                 # server's address family if -s set
     PORT       = 53                   # -p: port
-    USERNAME   = 'named'              # username to run as
-    GROUPNAME  = 'named'              # group to run as
+    USERNAME   = None                 # username to switch to (if root)
+    GROUPNAME  = None                 # group to switch to (if root)
     ZONEFILE   = 'zonefile'           # zone file (master zone file format)
     NO_EDNS    = True                 # Ignore EDNS in queries
 
@@ -35,14 +35,20 @@ def dprint(input):
 def usage():
     """Usage string"""
     print("""\
-Usage: %s [<options>]
+Usage: %s [<Options>]
 
 Options:
        -h:        Print usage string
        -d:        Turn on debugging
        -p N:      Listen on port N (default 53)
-       -s A:      Bind to server address A
-
+       -s A:      Bind to server address A (default wildcard address)
+       -z file:   Load and serve specified zone file (default 'zonefile')
+       -u uname:  Drop privileges to UID of specified username
+                  (if server started running as root)
+       -g group:  Drop provileges to GID of specified groupname
+                  (if server started running as root)
+       -4:        Use IPv4 only
+       -6:        Use IPv6 only
 """ % os.path.basename(sys.argv[0]))
     sys.exit(1)
 
@@ -65,7 +71,7 @@ def process_args(arguments):
     global Prefs
 
     try:
-        (options, args) = getopt.getopt(arguments, 'hds:p:')
+        (options, args) = getopt.getopt(arguments, 'hdp:s:z:u:g:46')
     except getopt.GetoptError:
         usage()
 
@@ -74,26 +80,38 @@ def process_args(arguments):
             usage()
         elif opt == "-d":
             Prefs.DEBUG = True
+        elif opt == "-p":
+            Prefs.PORT = int(optval)
         elif opt == "-s":
             Prefs.SERVER = optval
             set_server_af(optval)
-        elif opt == "-p":
-            Prefs.PORT = int(optval)
+        elif opt == "-z":
+            Prefs.ZONEFILE = optval
+        elif opt == "-u":
+            Prefs.USERNAME = optval
+        elif opt == "-g":
+            Prefs.GROUPNAME = optval
+        elif opt == "-4":
+            Prefs.SERVER_AF = 'IPv4'
+        elif opt == "-6":
+            Prefs.SERVER_AF = 'IPv6'
 
     return
 
 
-def drop_privs(uname=Prefs.USERNAME, gname=Prefs.GROUPNAME):
+def drop_privs(uname, gname):
     if os.geteuid() != 0:
-        print("INFO: Program did not start as root.")
+        print("WARNING: Program didn't start as root. Can't change uid/gid.")
     else:
-        uid = pwd.getpwnam(uname).pw_uid
-        gid = grp.getgrnam(gname).gr_gid
         os.setgroups([])
-        os.setgid(gid)
-        os.setegid(gid)
-        os.setuid(uid)
-        os.seteuid(uid)
+        if gname:
+            gid = grp.getgrnam(gname).gr_gid
+            os.setgid(gid)
+            os.setegid(gid)
+        if uname:
+            uid = pwd.getpwnam(uname).pw_uid
+            os.setuid(uid)
+            os.seteuid(uid)
     return
 
 
@@ -432,7 +450,8 @@ if __name__ == '__main__':
 
     fd_read, dispatch = setup_sockets(Prefs.SERVER_AF, Prefs.SERVER, Prefs.PORT)
 
-    drop_privs()
+    if (Prefs.USERNAME or Prefs.GROUPNAME):
+        drop_privs(Prefs.USERNAME, Prefs.GROUPNAME)
 
     print("Listening on UDP and TCP port %d" % Prefs.PORT)
 
