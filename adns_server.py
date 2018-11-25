@@ -308,31 +308,31 @@ class DNSresponse:
         if self.find_dname(qname):
             return
 
-        while True:
-            if z.zone.get_node(qname) is None:
-                wildcard = self.find_wildcard(qname)
-                if wildcard is not None:
-                    return self.find_answers(wildcard, qtype, wild=True)
-                else:
-                    self.rcode = dns.rcode.NXDOMAIN
-                    return
-            rdataset = z.zone.get_rdataset(qname, qtype)
-            if rdataset:
-                owner = self.qname if wild else qname
-                rrset = dns.rrset.RRset(owner, self.qclass, qtype)
-                rrset.update(rdataset)
-                self.answer_rrsets.append(rrset)
+        if z.zone.get_node(qname) is None:
+            wildcard = self.find_wildcard(qname)
+            if wildcard is not None:
+                self.find_answers(wildcard, qtype, wild=True)
+            else:
+                self.rcode = dns.rcode.NXDOMAIN
+                return
+
+        rdataset = z.zone.get_rdataset(qname, qtype)
+        if rdataset:
+            owner = self.qname if wild else qname
+            rrset = dns.rrset.RRset(owner, self.qclass, qtype)
+            rrset.update(rdataset)
+            self.answer_rrsets.append(rrset)
+            self.answer_resolved = True
+            return
+        else:
+            cname = self.find_cname(qname, wild)
+            if not cname:
+                return
+            if cname.is_subdomain(z.zone.origin):
+                self.find_answers(cname, qtype)
+            else:
                 self.answer_resolved = True
                 return
-            else:
-                cname = self.find_cname(qname, wild)
-                if not cname:
-                    return
-                if cname.is_subdomain(z.zone.origin):
-                    qname = cname
-                else:
-                    self.answer_resolved = True
-                    return
 
     def make_response(self):
 
