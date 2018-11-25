@@ -1,4 +1,5 @@
 # adns_server
+Version 0.1  
 A toy authoritative DNS server for experiments
 
 A quick and dirty Python authoritative DNS server, that I've
@@ -18,10 +19,8 @@ behavior of some other implementation that exhibits some problem).
 
 ### TODO list
 
-* Support daemon mode (in addition to foreground mode)
 * Handle EDNS
 * Support Zone Transfer
-* Better Logging options
 * Support DNSSEC
 * Support multiple zones
 * Support child zone delegations

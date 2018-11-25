@@ -6,12 +6,15 @@
     Author: Shumon Huque <shuque@gmail.com>
 """
 
-import getopt, os, os.path, sys, pwd, grp
+import getopt, os, os.path, sys, pwd, grp, syslog
 import struct, socket, select, errno, threading
 from binascii import hexlify
 import dns.zone, dns.name, dns.message, dns.flags, dns.rcode
 import dns.rdatatype, dns.rdataclass, dns.query, dns.edns
 
+
+PROGNAME = os.path.basename(sys.argv[0])
+VERSION  = '0.1'
 
 class Prefs:
     """Preferences"""
@@ -22,19 +25,17 @@ class Prefs:
     USERNAME   = None                 # username to switch to (if root)
     GROUPNAME  = None                 # group to switch to (if root)
     ZONEFILE   = 'zonefile'           # zone file (master zone file format)
+    DAEMON     = True                 # Become daemon (-f: foreground)
+    SYSLOG_FAC = syslog.LOG_DAEMON    # Syslog facility
+    SYSLOG_PRI = syslog.LOG_INFO      # Syslog priority
+    WORKDIR    = None                 # Working directory to change to
     NO_EDNS    = True                 # Ignore EDNS in queries
 
 
-def dprint(input):
-    if Prefs.DEBUG:
-        with tlock:
-            print("DEBUG: %s" % input)
-    return
-
-
 def usage():
-    """Usage string"""
+    """Print usage string and exit"""
     print("""\
+%s version %s
 Usage: %s [<Options>]
 
 Options:
@@ -49,7 +50,8 @@ Options:
                   (if server started running as root)
        -4:        Use IPv4 only
        -6:        Use IPv6 only
-""" % os.path.basename(sys.argv[0]))
+       -f:        Remain attached to foreground (default don't)
+""" % (PROGNAME, VERSION, PROGNAME))
     sys.exit(1)
 
 
@@ -71,7 +73,7 @@ def process_args(arguments):
     global Prefs
 
     try:
-        (options, args) = getopt.getopt(arguments, 'hdp:s:z:u:g:46')
+        (options, args) = getopt.getopt(arguments, 'hdp:s:z:u:g:46f')
     except getopt.GetoptError:
         usage()
 
@@ -95,13 +97,50 @@ def process_args(arguments):
             Prefs.SERVER_AF = 'IPv4'
         elif opt == "-6":
             Prefs.SERVER_AF = 'IPv6'
+        elif opt == "-f":
+            Prefs.DAEMON = False
 
     return
 
 
+def log_message(msg):
+    if Prefs.DAEMON:
+        syslog.syslog(Prefs.SYSLOG_PRI, msg)
+    else:
+        with tlock:
+            print(msg)
+
+
+def daemon(dirname=None, syslog_fac=syslog.LOG_DAEMON):
+
+    UMASK = 0o022
+
+    try:
+        pid = os.fork()
+        if pid > 0:
+            sys.exit(0)
+    except OSError as einfo:
+        print("fork() failed: %s" % einfo)
+        sys.exit(1)
+    else:
+        if dirname:
+            os.chdir(dirname)
+        os.umask(UMASK)
+        os.setsid()
+
+        for fd in range(0, os.sysconf("SC_OPEN_MAX")):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+        syslog.openlog(PROGNAME, syslog.LOG_PID, syslog_fac)
+        return
+
+
 def drop_privs(uname, gname):
     if os.geteuid() != 0:
-        print("WARNING: Program didn't start as root. Can't change uid/gid.")
+        log_message("WARNING: Program didn't start as root. Can't change id.")
     else:
         os.setgroups([])
         if gname:
@@ -156,10 +195,11 @@ def sendSocket(s, message):
         while (octetsSent < len(message)):
             sentn = s.send(message[octetsSent:])
             if sentn == 0:
+                log_message("ERROR: send() returned 0 bytes")
                 raise(ValueError, "send() returned 0 bytes")
             octetsSent += sentn
     except Exception as diag:
-        print("DEBUG: Exception: %s" % diag)
+        log_message("ERROR: sendSocket() exception: %s" % diag)
         return False
     else:
         return True
@@ -236,8 +276,23 @@ class DNSquery:
         try:
             self.message = dns.message.from_wire(self.wire_message)
         except Exception as e:
-            dprint("Unable to Parse Query: %s: %s" % (str(type(e)), e.message))
+            log_message("Unable to parse query: %s: %s" % (str(type(e)), e.message))
             self.message = None
+        else:
+            self.qname = self.message.question[0].name
+            self.qtype = self.message.question[0].rdtype
+            self.qclass = self.message.question[0].rdclass
+            self.log_query()
+
+    def log_query(self):
+        transport = "TCP" if self.tcp else "UDP"
+        log_message('query: %s %s %s %s from: %s,%d size=%d' % \
+                        (transport,
+                         self.qname,
+                         dns.rdatatype.to_text(self.qtype),
+                         dns.rdataclass.to_text(self.qclass),
+                         self.cliaddr, self.cliport,
+                         len(self.wire_message)))
 
 
 class DNSresponse:
@@ -246,6 +301,10 @@ class DNSresponse:
     def __init__(self, query):
 
         self.query = query
+        self.qname = query.message.question[0].name
+        self.qtype = query.message.question[0].rdtype
+        self.qclass = query.message.question[0].rdclass
+
         self.answer_rrsets = []
         self.answer_resolved = False
         self.rcode = dns.rcode.NOERROR
@@ -357,9 +416,6 @@ class DNSresponse:
         response = dns.message.make_response(self.query.message)
         if Prefs.NO_EDNS:
             response.use_edns(edns=False)
-        self.qname = self.query.message.question[0].name
-        self.qtype = self.query.message.question[0].rdtype
-        self.qclass = self.query.message.question[0].rdclass
 
         if self.qclass != dns.rdataclass.IN:
             response.set_rcode(dns.rcode.REFUSED)
@@ -380,7 +436,6 @@ class DNSresponse:
 
 
 def handle_query(query, sock):
-    dprint("RECEIVE QUERY:\n%s" % query.message)
 
     if not query.message:
         return
@@ -389,8 +444,6 @@ def handle_query(query, sock):
     if not response.message:
         return
 
-    dprint("SEND RESPONSE:\n%s" % response.message)
-    dprint(hexlify(response.wire_message))
     if query.tcp:
         sendSocket(sock, response.wire_message)
     else:
@@ -401,8 +454,9 @@ def handle_query(query, sock):
 def handle_connection_udp(sock, rbufsize=2048):
     data, addrport = sock.recvfrom(rbufsize)
     cliaddr, cliport = addrport[0:2]
-    dprint("UDP connection from (%s, %d) msgsize=%d" % 
-           (cliaddr, cliport, len(data)))
+    if Prefs.DEBUG:
+        log_message("UDP connection from (%s, %d) msgsize=%d" %
+                    (cliaddr, cliport, len(data)))
     q = DNSquery(data, cliaddr=cliaddr, cliport=cliport)
     handle_query(q, sock)
 
@@ -410,8 +464,9 @@ def handle_connection_udp(sock, rbufsize=2048):
 def handle_connection_tcp(sock, addr, rbufsize=2048):
     data = sock.recv(rbufsize)
     cliaddr, cliport = addr[0:2]
-    dprint("TCP connection from (%s, %d) msgsize=%d" %
-           (cliaddr, cliport, len(data)))
+    if Prefs.DEBUG:
+        log_message("TCP connection from (%s, %d) msgsize=%d" %
+                    (cliaddr, cliport, len(data)))
     q = DNSquery(data, cliaddr=cliaddr, cliport=cliport, tcp=True)
     handle_query(q, sock)
     sock.close()
@@ -444,18 +499,20 @@ def setup_sockets(family, server, port):
 if __name__ == '__main__':
 
     process_args(sys.argv[1:])
-
     z = Zone(Prefs.ZONEFILE)
-    print("Serving DNS zone: %s" % z.zone.origin)
+
+    if Prefs.DAEMON:
+        daemon(dirname=Prefs.WORKDIR)
+
+    tlock = threading.Lock()
+    log_message("%s version %s: Serving DNS zone: %s" % \
+                (PROGNAME, VERSION, z.zone.origin))
 
     fd_read, dispatch = setup_sockets(Prefs.SERVER_AF, Prefs.SERVER, Prefs.PORT)
-
     if (Prefs.USERNAME or Prefs.GROUPNAME):
         drop_privs(Prefs.USERNAME, Prefs.GROUPNAME)
 
-    print("Listening on UDP and TCP port %d" % Prefs.PORT)
-
-    tlock = threading.Lock()
+    log_message("Listening on UDP and TCP port %d" % Prefs.PORT)
 
     while True:
 
@@ -465,11 +522,8 @@ if __name__ == '__main__':
             if e[0] == errno.EINTR:
                 continue
             else:
-                print("Fatal error from select(): %s" % e)
+                log_message("ERROR: from select(): %s" % e)
                 sys.exit(1)
-        except KeyboardInterrupt:
-            print("Exiting.");
-            os._exit(0)
 
         if ready_r:
             for fd in ready_r:
@@ -485,4 +539,4 @@ if __name__ == '__main__':
                                              args=(s,)).start()
 
         # Do something in the main thread here if needed
-        #dprint("Heartbeat.")
+        #log_message("Heartbeat.")
