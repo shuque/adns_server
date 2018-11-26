@@ -258,6 +258,10 @@ class Zone:
             _ = self.zone.get_node(entry, create=True)
 
 
+def query_meta_type(qtype):
+    return 128 <= qtype <= 255
+
+
 class DNSquery:
     """DNS query object"""
 
@@ -439,6 +443,10 @@ class DNSresponse:
 
         if self.qclass != dns.rdataclass.IN:
             response.set_rcode(dns.rcode.REFUSED)
+            return response
+
+        if query_meta_type(self.qtype):
+            response.set_rcode(dns.rcode.NOTIMP)
             return response
 
         if not self.qname.is_subdomain(z.zone.origin):
