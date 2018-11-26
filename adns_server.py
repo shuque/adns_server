@@ -308,6 +308,8 @@ class DNSresponse:
         self.answer_rrsets = []
         self.answer_resolved = False
         self.rcode = dns.rcode.NOERROR
+        self.cname_list = []
+
         self.message = self.make_response()
         self.wire_message = self.message.to_wire()
         if self.query.tcp:
@@ -347,6 +349,10 @@ class DNSresponse:
         rdataset.add(cname_rdata)
         rrset.update(rdataset)
         self.answer_rrsets.append(rrset)
+        self.cname_list.append(qname)
+        if cname in self.cname_list:
+            log_message("WARN: CNAME loop: %s." % self.cname_list)
+            return
         if cname.is_subdomain(z.zone.origin):
             self.find_answers(cname, self.qtype)
         return
@@ -378,6 +384,7 @@ class DNSresponse:
         rrset.update(rdataset)
         self.answer_rrsets.append(rrset)
         cname = rdataset[0].target
+        self.cname_list.append(owner)
         return cname
 
     def find_answers(self, qname, qtype, wild=False):
@@ -404,6 +411,9 @@ class DNSresponse:
         else:
             cname = self.find_cname(qname, wild)
             if not cname:
+                return
+            if cname in self.cname_list:
+                log_message("WARN: CNAME loop: %s." % self.cname_list)
                 return
             if cname.is_subdomain(z.zone.origin):
                 self.find_answers(cname, qtype)
