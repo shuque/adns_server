@@ -6,6 +6,11 @@ A quick and dirty Python authoritative DNS server, that I've
 occasionally used for experimentation (often to simulate the
 behavior of some other implementation that exhibits some problem).
 
+### Pre-requisites
+
+* Python 3
+* The dnspython module (http://www.dnspython.org/)
+
 ### Notes
 
 * dnspython's dns.zone.Zone class uses a python dictionary (i.e. hash table)
