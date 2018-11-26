@@ -312,9 +312,19 @@ class DNSresponse:
 
         self.message = self.make_response()
         self.wire_message = self.message.to_wire()
+        if not self.query.tcp and len(self.wire_message) > 512:
+            self.truncate()
         if self.query.tcp:
             msglen = struct.pack('!H', len(self.wire_message))
             self.wire_message = msglen + self.wire_message
+
+    def truncate(self):
+        self.message.flags |= dns.flags.TC
+        self.message.answer = []
+        self.message.authority = []
+        self.message.additional = []
+        self.wire_message = self.message.to_wire()
+        pass
 
     def soa_rr(self):
         return z.zone.get_rrset(z.zone.origin, dns.rdatatype.SOA)
