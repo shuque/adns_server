@@ -470,6 +470,9 @@ class DNSresponse:
         else:
             if response.edns != -1:
                 response.payload = Prefs.UDP_ADV
+                if self.query.message.edns != 0:
+                    response.set_rcode(dns.rcode.BADVERS)
+                    return response
 
         if self.qclass != dns.rdataclass.IN:
             response.set_rcode(dns.rcode.REFUSED)
