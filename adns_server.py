@@ -29,7 +29,9 @@ class Prefs:
     SYSLOG_FAC = syslog.LOG_DAEMON    # Syslog facility
     SYSLOG_PRI = syslog.LOG_INFO      # Syslog priority
     WORKDIR    = None                 # Working directory to change to
-    NO_EDNS    = True                 # Ignore EDNS in queries
+    EDNS       = True                 # Support EDNS (-e disables it)
+    UDP_MAX    = 4096                 # Max EDNS UDP payload we send
+    UDP_ADV    = 2048                 # Max EDNS UDP payload we advertise
 
 
 def usage():
@@ -51,6 +53,7 @@ Options:
        -4:        Use IPv4 only
        -6:        Use IPv6 only
        -f:        Remain attached to foreground (default don't)
+       -e:        Disable EDNS0 support
 """ % (PROGNAME, VERSION, PROGNAME))
     sys.exit(1)
 
@@ -73,7 +76,7 @@ def process_args(arguments):
     global Prefs
 
     try:
-        (options, args) = getopt.getopt(arguments, 'hdp:s:z:u:g:46f')
+        (options, args) = getopt.getopt(arguments, 'hdp:s:z:u:g:46fe')
     except getopt.GetoptError:
         usage()
 
@@ -99,6 +102,8 @@ def process_args(arguments):
             Prefs.SERVER_AF = 'IPv6'
         elif opt == "-f":
             Prefs.DAEMON = False
+        elif opt == "-e":
+            Prefs.EDNS = False
 
     return
 
@@ -315,20 +320,33 @@ class DNSresponse:
         self.cname_list = []
 
         self.message = self.make_response()
-        self.wire_message = self.message.to_wire()
-        if not self.query.tcp and len(self.wire_message) > 512:
-            self.truncate()
+        self.wire_message = self.to_wire()
+
+    def to_wire(self):
+        payload_max = self.max_size()
+        try:
+            wire = self.message.to_wire(max_size=payload_max)
+        except dns.exception.TooBig:
+            wire = self.truncate()
         if self.query.tcp:
-            msglen = struct.pack('!H', len(self.wire_message))
-            self.wire_message = msglen + self.wire_message
+            msglen = struct.pack('!H', len(wire))
+            wire = msglen + wire
+        return wire
+
+    def max_size(self):
+        if self.query.tcp:
+            return 65533
+        elif self.query.message.edns == -1:
+            return 512
+        else:
+            return self.query.message.payload
 
     def truncate(self):
         self.message.flags |= dns.flags.TC
         self.message.answer = []
         self.message.authority = []
         self.message.additional = []
-        self.wire_message = self.message.to_wire()
-        pass
+        return self.message.to_wire()
 
     def soa_rr(self):
         return z.zone.get_rrset(z.zone.origin, dns.rdatatype.SOA)
@@ -438,8 +456,11 @@ class DNSresponse:
     def make_response(self):
 
         response = dns.message.make_response(self.query.message)
-        if Prefs.NO_EDNS:
+        if not Prefs.EDNS:
             response.use_edns(edns=False)
+        else:
+            if response.edns != -1:
+                response.payload = Prefs.UDP_ADV
 
         if self.qclass != dns.rdataclass.IN:
             response.set_rcode(dns.rcode.REFUSED)

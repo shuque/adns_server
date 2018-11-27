@@ -24,7 +24,7 @@ behavior of some other implementation that exhibits some problem).
 
 ### TODO list
 
-* Handle EDNS
+* Implement specific EDNS options
 * Support Zone Transfer
 * Support DNSSEC
 * Support multiple zones
