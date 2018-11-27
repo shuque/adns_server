@@ -116,13 +116,21 @@ def log_message(msg):
             print(msg)
 
 
+def handle_sighup(signum, frame):
+    global z
+    log_message('Caught SIGHUP .. re-reading zone file.')
+    z = Zone(Prefs.ZONEFILE)
+    return
+
+
 def handle_sigterm(signum, frame):
-    log_message('Handling SIGTERM .. exiting.')
+    log_message('Caught SIGTERM .. exiting.')
     sys.exit(0)
 
 
 def install_signal_handlers():
     signal.signal(signal.SIGTERM, handle_sigterm)
+    signal.signal(signal.SIGHUP, handle_sighup)
 
 
 def daemon(dirname=None, syslog_fac=syslog.LOG_DAEMON):
