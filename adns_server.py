@@ -7,7 +7,7 @@
 """
 
 import getopt, os, os.path, sys, pwd, grp, syslog
-import struct, socket, select, errno, threading
+import struct, socket, select, errno, threading, signal
 from binascii import hexlify
 import dns.zone, dns.name, dns.message, dns.flags, dns.rcode
 import dns.rdatatype, dns.rdataclass, dns.query, dns.edns
@@ -114,6 +114,15 @@ def log_message(msg):
     else:
         with tlock:
             print(msg)
+
+
+def handle_sigterm(signum, frame):
+    log_message('Handling SIGTERM .. exiting.')
+    sys.exit(0)
+
+
+def install_signal_handlers():
+    signal.signal(signal.SIGTERM, handle_sigterm)
 
 
 def daemon(dirname=None, syslog_fac=syslog.LOG_DAEMON):
@@ -552,6 +561,8 @@ if __name__ == '__main__':
 
     if Prefs.DAEMON:
         daemon(dirname=Prefs.WORKDIR)
+
+    install_signal_handlers()
 
     tlock = threading.Lock()
     log_message("%s version %s: Serving DNS zone: %s" % \
