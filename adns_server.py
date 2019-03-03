@@ -116,6 +116,11 @@ def log_message(msg):
             print(msg)
 
 
+def log_fatal(msg):
+    log_message(msg)
+    sys.exit(1)
+
+
 def handle_sighup(signum, frame):
     global z
     log_message('Caught SIGHUP .. re-reading zone file.')
@@ -294,10 +299,11 @@ class DNSquery:
 
         self.tcp = tcp
         if self.tcp:
-            msg_len, = struct.unpack('!H', data[:2])
-            self.wire_message = data[2:2+msg_len]
+            self.msg_len, = struct.unpack('!H', data[:2])
+            self.wire_message = data[2:2+self.msg_len]
         else:
             self.wire_message = data
+            self.msg_len = len(data)
 
         try:
             self.message = dns.message.from_wire(self.wire_message)
@@ -317,8 +323,7 @@ class DNSquery:
                          self.qname,
                          dns.rdatatype.to_text(self.qtype),
                          dns.rdataclass.to_text(self.qclass),
-                         self.cliaddr, self.cliport,
-                         len(self.wire_message)))
+                         self.cliaddr, self.cliport, self.msg_len))
 
 
 class DNSresponse:
@@ -579,7 +584,12 @@ if __name__ == '__main__':
     log_message("%s version %s: Serving DNS zone: %s" % \
                 (PROGNAME, VERSION, z.zone.origin))
 
-    fd_read, dispatch = setup_sockets(Prefs.SERVER_AF, Prefs.SERVER, Prefs.PORT)
+    try:
+        fd_read, dispatch = setup_sockets(Prefs.SERVER_AF,
+                                          Prefs.SERVER, Prefs.PORT)
+    except PermissionError as e:
+        log_fatal("Error setting up sockets: {}".format(e))
+
     if (Prefs.USERNAME or Prefs.GROUPNAME):
         drop_privs(Prefs.USERNAME, Prefs.GROUPNAME)
 
