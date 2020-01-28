@@ -370,7 +370,7 @@ class DNSresponse:
         self.message.additional = []
         return self.message.to_wire()
 
-    def soa_rr(self):
+    def soa_rrset(self):
         return z.zone.get_rrset(z.zone.origin, dns.rdatatype.SOA)
 
     def closest_encloser(self, qname):
@@ -503,8 +503,11 @@ class DNSresponse:
         response.flags |= dns.flags.AA
         response.set_rcode(self.rcode)
         response.answer = self.answer_rrsets
+
         if not self.answer_resolved:
-            response.authority = [self.soa_rr()]
+            soa_rrset = self.soa_rrset()
+            soa_rrset.ttl = min(soa_rrset.ttl, soa_rrset[0].minimum)
+            response.authority = [soa_rrset]
 
         return response
 
