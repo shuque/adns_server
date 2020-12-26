@@ -1,0 +1,8 @@
+config:
+  port: 5309
+  user: "named"
+  group: "named"
+  edns: 1432
+zones:
+  - name: "example.com"
+    file: "zonefile"

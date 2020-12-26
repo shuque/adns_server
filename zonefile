@@ -8,9 +8,13 @@ $TTL 7200
 					3600       ; minimum (1 hour)
 				)
                              IN  NS     ns1.example.com.
+                             IN  NS     ns2.example.com.
                              IN  MX     0 .
 			     IN	 A	104.236.200.251
 ns1			     IN	 A	104.236.200.251
+ns2			     IN	 A	104.236.100.7
+;;
+www			     IN  A      10.1.2.3
 ;;
 ;; ent.example.com is an empty non-terminal
 ;;
@@ -18,9 +22,10 @@ blah.ent		     IN	 A	10.1.1.1
 			     IN	 A	10.1.1.2
 			     IN	 A	10.1.1.3
 ;;
-;; wildcard
+;; wildcard & explicit name parallel to it
 ;;
 *.wild			     IN	 A	10.5.5.5
+foo.wild		     IN	 A	10.8.8.8
 ;;
 ;; in-zone cname
 ;;
@@ -65,6 +70,10 @@ dnameloop1		     IN  DNAME  dnameloop2.example.com.
 dnameloop2		     IN  DNAME  dnameloop1.example.com.
 x1.dnameloop1		     IN  A	10.9.9.11
 x1.dnameloop2		     IN	 A	10.9.9.12
+;;
+generic1		     IN  TYPE65534 \# 5 08396F0001
+null			     IN  TYPE10 \# 12 444E53206973207765697264
+;;
 ;;
 ;; Large RRset to test truncated UDP responses
 ;;
@@ -128,3 +137,19 @@ large.example.com.	300	IN	A	127.0.9.57
 large.example.com.	300	IN	A	127.0.9.58
 large.example.com.	300	IN	A	127.0.9.59
 large.example.com.	300	IN	A	127.0.9.60
+;;
+;; Child delegations
+;;
+sub1				IN	NS	ns1.sub1.example.com.
+sub1				IN	NS	ns2.sub1.example.com.
+sub1				IN	NS	ns3.cloudflare.com.
+ns1.sub1.example.com.		IN	A	10.101.1.1
+ns2.sub1.example.com.		IN	A	10.101.1.2
+sub2				IN	NS	ns1.sub2.example.com.
+sub2				IN	NS	ns2.sub2.example.com.
+ns1.sub2.example.com.		IN	A	10.102.2.1
+ns2.sub2.example.com.		IN	A	10.102.2.2
+;;
+;; CNAME which leads into a delegated zone
+;;
+pointy.example.com.	300	IN	CNAME	rakuda.sub1.example.com.

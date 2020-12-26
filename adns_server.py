@@ -1,51 +1,74 @@
 #!/usr/bin/env python3
 
 """
-    Toy Authoritative DNS server for experimentation.
-    [Work in Progress ..]
-    Author: Shumon Huque <shuque@gmail.com>
+A Toy Authoritative DNS server for experimentation.
+
+Author: Shumon Huque <shuque@gmail.com>
+
 """
 
-import getopt, os, os.path, sys, pwd, grp, syslog
-import struct, socket, select, errno, threading, signal
-from binascii import hexlify
-import dns.zone, dns.name, dns.message, dns.flags, dns.rcode
-import dns.rdatatype, dns.rdataclass, dns.query, dns.edns
+import os
+import sys
+import getopt
+import pwd
+import grp
+import syslog
+import struct
+import socket
+import select
+import threading
+import signal
+import yaml
+
+import dns.zone
+import dns.name
+import dns.message
+import dns.flags
+import dns.rcode
+import dns.rdatatype
+import dns.rdataclass
+import dns.query
+import dns.edns
 
 
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION  = '0.1'
+VERSION = '0.2.0'
+CONFIG_DEFAULT = 'adnsconfig.yaml'
+
 
 class Prefs:
     """Preferences"""
-    DEBUG      = False                # -d: Print debugging output
-    SERVER     = ''                   # -s: server listening address
-    SERVER_AF  = None                 # server's address family if -s set
-    PORT       = 53                   # -p: port
-    USERNAME   = None                 # username to switch to (if root)
-    GROUPNAME  = None                 # group to switch to (if root)
-    ZONEFILE   = 'zonefile'           # zone file (master zone file format)
-    DAEMON     = True                 # Become daemon (-f: foreground)
+    CONFIG = CONFIG_DEFAULT           # -c: Configuration file
+    DEBUG = False                     # -d: Print debugging output
+    SERVER = ''                       # -s: server listening address
+    SERVER_AF = None                  # server's address family if -s set
+    PORT = 53                         # -p: port
+    USERNAME = None                   # username to switch to (if root)
+    GROUPNAME = None                  # group to switch to (if root)
+    DAEMON = True                     # Become daemon (-f: foreground)
     SYSLOG_FAC = syslog.LOG_DAEMON    # Syslog facility
     SYSLOG_PRI = syslog.LOG_INFO      # Syslog priority
-    WORKDIR    = None                 # Working directory to change to
-    EDNS       = True                 # Support EDNS (-e disables it)
-    UDP_MAX    = 4096                 # Max EDNS UDP payload we send
-    UDP_ADV    = 2048                 # Max EDNS UDP payload we advertise
+    WORKDIR = None                    # Working directory to change to
+    EDNS_UDP_MAX = 1432               # -e: Max EDNS UDP payload we send
+    EDNS_UDP_ADV = 1232               # Max EDNS UDP payload we advertise
 
 
-def usage():
+def usage(msg=None):
     """Print usage string and exit"""
+
+    if msg is not None:
+        print("ERROR: {}\n".format(msg))
+
     print("""\
-%s version %s
-Usage: %s [<Options>]
+{0} version {1}
+Usage: {0} [<Options>]
 
 Options:
        -h:        Print usage string
+       -c file:   Configuration file (default '{2}')
        -d:        Turn on debugging
        -p N:      Listen on port N (default 53)
        -s A:      Bind to server address A (default wildcard address)
-       -z file:   Load and serve specified zone file (default 'zonefile')
        -u uname:  Drop privileges to UID of specified username
                   (if server started running as root)
        -g group:  Drop provileges to GID of specified groupname
@@ -53,16 +76,50 @@ Options:
        -4:        Use IPv4 only
        -6:        Use IPv6 only
        -f:        Remain attached to foreground (default don't)
-       -e:        Disable EDNS0 support
-""" % (PROGNAME, VERSION, PROGNAME))
+       -e N:      Max EDNS bufsize in octets for responses we send out.
+                  (-e 0 will disable EDNS support)
+
+Note: a configuration file that minimally specifies the zones to load
+must be present.
+""".format(PROGNAME, VERSION, CONFIG_DEFAULT))
     sys.exit(1)
 
 
-def set_server_af(address):
+def init_config(only_zones=False):
+    """Initialize parameters and zone files from config file"""
 
     global Prefs
 
-    if address.find('.') != -1: 
+    zone_dict = {}
+    ydoc = yaml.load(open(Prefs.CONFIG).read(), Loader=yaml.SafeLoader)
+    if not only_zones:
+        if "config" in ydoc:
+            for key, val in ydoc['config'].items():
+                if key == 'port':
+                    Prefs.PORT = val
+                elif key == 'edns':
+                    Prefs.EDNS_UDP_MAX = val
+                elif key == 'user':
+                    Prefs.USERNAME = val
+                elif key == 'group':
+                    Prefs.GROUPNAME = val
+    if "zones" in ydoc:
+        for entry in ydoc['zones']:
+            zonename = dns.name.from_text(entry['name'])
+            zonefile = entry['file']
+            zone_dict[zonename] = Zone(zonename, zonefile)
+    if not zone_dict:
+        print("ERROR: no zones defined.")
+        sys.exit(1)
+    return zone_dict
+
+
+def set_server_af(address):
+    """Set server's address family"""
+
+    global Prefs
+
+    if address.find('.') != -1:
         Prefs.SERVER_AF = 'IPv4'
     elif address.find(':') != -1:
         Prefs.SERVER_AF = 'IPv6'
@@ -73,12 +130,21 @@ def set_server_af(address):
 def process_args(arguments):
     """Process all command line arguments"""
 
-    global Prefs
+    global Prefs, ZONEDICT
 
     try:
-        (options, args) = getopt.getopt(arguments, 'hdp:s:z:u:g:46fe')
-    except getopt.GetoptError:
-        usage()
+        (options, args) = getopt.getopt(arguments, 'hc:dp:s:z:u:g:46fe:')
+    except getopt.GetoptError as error_info:
+        usage(str(error_info))
+
+    if args:
+        usage("No additional arguments allowed: {}".format(" ".join(args)))
+
+    config_supplied = [x for x in options if x[0] == '-c']
+    if config_supplied:
+        Prefs.CONFIG = config_supplied[0][1]
+    print("Reading config from: {}".format(Prefs.CONFIG))
+    ZONEDICT = init_config()
 
     for (opt, optval) in options:
         if opt == "-h":
@@ -90,8 +156,6 @@ def process_args(arguments):
         elif opt == "-s":
             Prefs.SERVER = optval
             set_server_af(optval)
-        elif opt == "-z":
-            Prefs.ZONEFILE = optval
         elif opt == "-u":
             Prefs.USERNAME = optval
         elif opt == "-g":
@@ -103,44 +167,50 @@ def process_args(arguments):
         elif opt == "-f":
             Prefs.DAEMON = False
         elif opt == "-e":
-            Prefs.EDNS = False
-
-    return
+            Prefs.EDNS_UDP_MAX = int(optval)
 
 
 def log_message(msg):
+    """log informational message"""
     if Prefs.DAEMON:
         syslog.syslog(Prefs.SYSLOG_PRI, msg)
     else:
-        with tlock:
-            print(msg)
+        tlock.acquire()
+        print(msg)
+        tlock.release()
 
 
 def log_fatal(msg):
+    """log fatal error message and bail out"""
     log_message(msg)
     sys.exit(1)
 
 
 def handle_sighup(signum, frame):
-    global z
+    """handle SIGHUP - re-read zone files"""
+    global ZONEDICT
+    _, _ = signum, frame
     log_message('Caught SIGHUP .. re-reading zone file.')
-    z = Zone(Prefs.ZONEFILE)
-    return
+    ZONEDICT = init_config(only_zones=True)
 
 
 def handle_sigterm(signum, frame):
+    """handle SIGTERM - exit program"""
+    _, _ = signum, frame
     log_message('Caught SIGTERM .. exiting.')
     sys.exit(0)
 
 
 def install_signal_handlers():
+    """Install handlers for HUP and TERM signals"""
     signal.signal(signal.SIGTERM, handle_sigterm)
     signal.signal(signal.SIGHUP, handle_sighup)
 
 
 def daemon(dirname=None, syslog_fac=syslog.LOG_DAEMON):
+    """Turn into daemon"""
 
-    UMASK = 0o022
+    umask_value = 0o022
 
     try:
         pid = os.fork()
@@ -152,7 +222,7 @@ def daemon(dirname=None, syslog_fac=syslog.LOG_DAEMON):
     else:
         if dirname:
             os.chdir(dirname)
-        os.umask(UMASK)
+        os.umask(umask_value)
         os.setsid()
 
         for fd in range(0, os.sysconf("SC_OPEN_MAX")):
@@ -166,6 +236,8 @@ def daemon(dirname=None, syslog_fac=syslog.LOG_DAEMON):
 
 
 def drop_privs(uname, gname):
+    """If run as root, drop privileges to specified uid and gid"""
+
     if os.geteuid() != 0:
         log_message("WARNING: Program didn't start as root. Can't change id.")
     else:
@@ -178,7 +250,6 @@ def drop_privs(uname, gname):
             uid = pwd.getpwnam(uname).pw_uid
             os.setuid(uid)
             os.seteuid(uid)
-    return
 
 
 def udp4socket(host, port):
@@ -215,41 +286,41 @@ def tcp6socket(host, port):
     return sock
 
 
-def sendSocket(s, message):
+def send_socket(sock, message):
     """Send message on a connected socket"""
     try:
-        octetsSent = 0
-        while (octetsSent < len(message)):
-            sentn = s.send(message[octetsSent:])
+        octets_sent = 0
+        while octets_sent < len(message):
+            sentn = sock.send(message[octets_sent:])
             if sentn == 0:
                 log_message("ERROR: send() returned 0 bytes")
-                raise(ValueError, "send() returned 0 bytes")
-            octetsSent += sentn
-    except Exception as diag:
-        log_message("ERROR: sendSocket() exception: %s" % diag)
+                raise ValueError("send() returned 0 bytes")
+            octets_sent += sentn
+    except OSError as diag:
+        log_message("ERROR: sendSocket() exception: {}".format(diag))
         return False
     else:
         return True
 
 
-def recvSocket(s, numOctets):
+def recv_socket(sock, numOctets):
     """Read and return numOctets of data from a connected socket"""
     response = ""
-    octetsRead = 0
-    while (octetsRead < numOctets):
-        chunk = s.recv(numOctets-octetsRead)
+    octets_read = 0
+    while octets_read < numOctets:
+        chunk = sock.recv(numOctets - octets_read)
         chunklen = len(chunk)
         if chunklen == 0:
             return ""
-        octetsRead += chunklen
+        octets_read += chunklen
         response += chunk
     return response
 
 
-def add_dict_key(d, k):
-    """Add key k to dictionary d, if not already present"""
-    if k not in d:
-        d[k] = 1
+def add_dict_key(dictname, key):
+    """Add key to dictionary, if not already present"""
+    if key not in dictname:
+        dictname[key] = 1
 
 
 class Zone:
@@ -257,17 +328,20 @@ class Zone:
     Zone object: contains a dns.zone.Zone object, modified to include
     all empty non-terminals as explicit nodes. Otherwise, the dns.zone
     module's find_node() method returns the wrong results for empty
-    non-terminals.
+    non-terminals. TODO: I should really rewrite the zone data structure
+    as an actual tree.
     """
 
-    def __init__(self, filename):
+    def __init__(self, zonename, filename):
         self.filename = filename
-        self.zone = dns.zone.from_file(filename, relativize=False)
+        self.zone = dns.zone.from_file(filename, origin=zonename,
+                                       relativize=False)
         self.add_nodes(self.get_ent_nodes())
 
     def get_ent_nodes(self):
         ent_nodes = {}
         for name, node in self.zone.items():
+            _ = node
             if name == self.zone.origin:
                 continue
             n = name
@@ -286,6 +360,7 @@ class Zone:
 
 
 def query_meta_type(qtype):
+    """Is given query type a meta type?"""
     return 128 <= qtype <= 255
 
 
@@ -294,6 +369,7 @@ class DNSquery:
 
     def __init__(self, data, cliaddr, cliport, tcp=False):
 
+        self.malformed = False
         self.cliaddr = cliaddr
         self.cliport = cliport
 
@@ -307,9 +383,11 @@ class DNSquery:
 
         try:
             self.message = dns.message.from_wire(self.wire_message)
-        except Exception as e:
-            log_message("Unable to parse query: %s: %s" % (str(type(e)), e.message))
+        except dns.exception.DNSException as exc_info:
+            log_message("Can't parse query: {}: {}".format(
+                type(exc_info), exc_info))
             self.message = None
+            self.malformed = True
         else:
             self.qname = self.message.question[0].name
             self.qtype = self.message.question[0].rdtype
@@ -336,18 +414,19 @@ class DNSresponse:
         self.qtype = query.message.question[0].rdtype
         self.qclass = query.message.question[0].rdclass
 
-        self.answer_rrsets = []
-        self.answer_resolved = False
-        self.rcode = dns.rcode.NOERROR
-        self.cname_list = []
+        self.response = dns.message.make_response(query.message)
+        self.response.set_rcode(dns.rcode.NOERROR)
+        self.is_referral = False
+        self.cname_owner_list = []
+        self.dname_owner_list = []
 
-        self.message = self.make_response()
+        self.prepare_response()
         self.wire_message = self.to_wire()
 
     def to_wire(self):
         payload_max = self.max_size()
         try:
-            wire = self.message.to_wire(max_size=payload_max)
+            wire = self.response.to_wire(max_size=payload_max)
         except dns.exception.TooBig:
             wire = self.truncate()
         if self.query.tcp:
@@ -358,198 +437,232 @@ class DNSresponse:
     def max_size(self):
         if self.query.tcp:
             return 65533
-        elif self.query.message.edns == -1:
+        if (Prefs.EDNS_UDP_MAX == 0) or (self.query.message.edns == -1):
             return 512
-        else:
-            return self.query.message.payload
+        return min(self.query.message.payload, Prefs.EDNS_UDP_MAX)
 
     def truncate(self):
-        self.message.flags |= dns.flags.TC
-        self.message.answer = []
-        self.message.authority = []
-        self.message.additional = []
-        return self.message.to_wire()
+        self.response.flags |= dns.flags.TC
+        self.response.answer = []
+        self.response.authority = []
+        self.response.additional = []
+        return self.response.to_wire()
 
-    def soa_rrset(self):
-        return z.zone.get_rrset(z.zone.origin, dns.rdatatype.SOA)
+    def add_soa(self, zobj):
+        soa_rrset = zobj.zone.get_rrset(zobj.zone.origin, dns.rdatatype.SOA)
+        soa_rrset.ttl = min(soa_rrset.ttl, soa_rrset[0].minimum)
+        self.response.authority = [soa_rrset]
 
-    def closest_encloser(self, qname):
-        node = qname.parent()
-        while True:
-            if z.zone.get_node(node) is not None:
-                return node
-            else:
-                node = dns.name.Name(node.labels[1:])
+    def find_rrtype(self, zobj, sname, stype, wildcard_match=None):
 
-    def find_wildcard(self, qname):
-        wildcard = dns.name.Name((b'*',) + self.closest_encloser(qname).labels)
-        if z.zone.get_node(wildcard) is not None:
-            return wildcard
-        else:
-            return None
+        rrname = wildcard_match if wildcard_match else sname
 
-    def synthesize_cname(self, qname, labels, dname_rdataset):
-        dname = dname_rdataset[0].target
-        try:
-            cname = dns.name.Name(labels[::-1] + dname.labels)
-        except dns.name.NameTooLong:
-            self.rcode = dns.rcode.YXDOMAIN
+        # Look for CNAME; if found process CNAME
+        rdataset = zobj.zone.get_rdataset(sname, dns.rdatatype.CNAME)
+        if rdataset:
+            self.process_cname(rrname, sname, stype, rdataset)
+            return True
+
+        # Look for requested RRtype
+        rdataset = zobj.zone.get_rdataset(sname, stype)
+        if rdataset:
+            rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN, stype)
+            rrset.update(rdataset)
+            self.response.answer.append(rrset)
+            return True
+
+        # NODATA - add SOA
+        self.add_soa(zobj)
+        return True
+
+    def do_referral(self, zobj, sname, rdataset):
+
+        self.is_referral = True
+        ns_rrset = dns.rrset.RRset(sname, dns.rdataclass.IN, dns.rdatatype.NS)
+        ns_rrset.update(rdataset)
+        self.response.authority.append(ns_rrset)
+        for rdata in rdataset:
+            if not rdata.target.is_subdomain(sname):
+                continue
+            for rrtype in (dns.rdatatype.A, dns.rdatatype.AAAA):
+                rdataset = zobj.zone.get_rdataset(rdata.target, rrtype)
+                if rdataset:
+                    rrset = dns.rrset.RRset(rdata.target,
+                                            dns.rdataclass.IN, rrtype)
+                    rrset.update(rdataset)
+                    self.response.additional.append(rrset)
+
+    def process_cname(self, rrname, sname, stype, cname_rdataset):
+
+        if sname in self.cname_owner_list:
+            print("ERROR: CNAME loop detected at {}".format(sname))
+            self.response.set_rcode(dns.rcode.SERVFAIL)
             return
-        rrset = dns.rrset.RRset(qname, self.qclass, dns.rdatatype.CNAME)
-        rdataset = dns.rdataset.Rdataset(self.qclass, dns.rdatatype.CNAME)
+        self.cname_owner_list.append(sname)
+        rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN,
+                                dns.rdatatype.CNAME)
+        rrset.update(cname_rdataset)
+        self.response.answer.append(rrset)
+        self.find_answer(cname_rdataset[0].target, stype)
+
+    def process_dname(self, qname, sname, stype, dname_rdataset):
+
+        if sname in self.dname_owner_list:
+            print("ERROR: DNAME loop detected at {}".format(sname))
+            self.response.set_rcode(dns.rcode.SERVFAIL)
+            return
+        self.dname_owner_list.append(sname)
+        rrset = dns.rrset.RRset(sname, dns.rdataclass.IN, dns.rdatatype.DNAME)
+        rrset.update(dname_rdataset)
+        self.response.answer.append(rrset)
+        dname_target = dname_rdataset[0].target
+        try:
+            cname_target = dns.name.Name(
+                qname.relativize(sname).labels + dname_target.labels)
+        except dns.name.NameTooLong:
+            self.response.set_rcode(dns.rcode.YXDOMAIN)
+            return
+
+        rdataset = dns.rdataset.Rdataset(dns.rdataclass.IN,
+                                         dns.rdatatype.CNAME)
         rdataset.update_ttl(dname_rdataset.ttl)
         cname_rdata = dns.rdtypes.ANY.CNAME.CNAME(dns.rdataclass.IN,
-                                                  dns.rdatatype.CNAME, cname)
+                                                  dns.rdatatype.CNAME,
+                                                  cname_target)
         rdataset.add(cname_rdata)
-        rrset.update(rdataset)
-        self.answer_rrsets.append(rrset)
-        self.cname_list.append(qname)
-        if cname in self.cname_list:
-            log_message("WARN: CNAME loop: %s." % self.cname_list)
-            return
-        if cname.is_subdomain(z.zone.origin):
-            self.find_answers(cname, self.qtype)
+        self.process_cname(qname, qname, stype, rdataset)
         return
 
-    def find_dname(self, qname):
-        remaining_labels = qname.relativize(z.zone.origin)[::-1]
-        candidate = z.zone.origin
-        while remaining_labels and (candidate != qname):
-            rdataset = z.zone.get_rdataset(candidate, dns.rdatatype.DNAME)
+    def process_name(self, zobj, qname, sname, stype):
+
+        node = zobj.zone.get_node(sname)
+        if node is None:
+            # Look for wildcard
+            wildcard = dns.name.Name((b'*',) + sname.labels[1:])
+            if zobj.zone.get_node(wildcard) is not None:
+                return self.find_rrtype(zobj, wildcard, stype,
+                                        wildcard_match=sname)
+            self.response.set_rcode(dns.rcode.NXDOMAIN)
+            self.add_soa(zobj)
+            return True
+
+        # Look for DNAME
+        dname_rdataset = zobj.zone.get_rdataset(sname, dns.rdatatype.DNAME)
+        if dname_rdataset:
+            self.process_dname(qname, sname, stype, dname_rdataset)
+            return True
+
+        # Look for delegation
+        if sname != zobj.zone.origin:
+            rdataset = zobj.zone.get_rdataset(sname, dns.rdatatype.NS)
             if rdataset:
-                rrset = dns.rrset.RRset(candidate, self.qclass, dns.rdatatype.DNAME)
-                rrset.update(rdataset)
-                self.answer_rrsets.append(rrset)
-                self.synthesize_cname(qname, remaining_labels, rdataset)
-                self.answer_resolved = True
+                self.do_referral(zobj, sname, rdataset)
                 return True
-            l = remaining_labels[0]
-            remaining_labels = remaining_labels[1:]
-            candidate = dns.name.Name((l,) + candidate.labels)
-        else:
+
+        if sname != qname:
             return False
 
-    def find_cname(self, name, wild=False):
-        rdataset = z.zone.get_rdataset(name, dns.rdatatype.CNAME)
-        if not rdataset:
-            return None
-        owner = self.qname if wild else name
-        rrset = dns.rrset.RRset(owner, self.qclass, dns.rdatatype.CNAME)
-        rrset.update(rdataset)
-        self.answer_rrsets.append(rrset)
-        cname = rdataset[0].target
-        self.cname_list.append(owner)
-        return cname
+        return self.find_rrtype(zobj, sname, stype)
 
-    def find_answers(self, qname, qtype, wild=False):
+    def find_answer_in_zone(self, zobj, qname, qtype):
 
-        if self.find_dname(qname):
+        zone_name = zobj.zone.origin
+        label_list = list(qname.relativize(zone_name).labels)
+
+        current_name = zone_name
+        while True:
+            finished = self.process_name(zobj, qname, current_name, qtype)
+            if finished or (not label_list):
+                break
+            label = label_list.pop()
+            current_name = dns.name.Name((label,) + current_name.labels)
+
+    def find_answer(self, qname, qtype):
+
+        zobj = find_zone(qname)
+        if zobj is None:
+            if not self.response.answer:
+                self.response.set_rcode(dns.rcode.REFUSED)
             return
+        self.find_answer_in_zone(zobj, qname, qtype)
 
-        if z.zone.get_node(qname) is None:
-            wildcard = self.find_wildcard(qname)
-            if wildcard is not None:
-                self.find_answers(wildcard, qtype, wild=True)
-            else:
-                self.rcode = dns.rcode.NXDOMAIN
-                return
+    def prepare_response(self):
 
-        rdataset = z.zone.get_rdataset(qname, qtype)
-        if rdataset:
-            owner = self.qname if wild else qname
-            rrset = dns.rrset.RRset(owner, self.qclass, qtype)
-            rrset.update(rdataset)
-            self.answer_rrsets.append(rrset)
-            self.answer_resolved = True
-            return
+        if Prefs.EDNS_UDP_MAX == 0:
+            self.response.use_edns(edns=False)
         else:
-            cname = self.find_cname(qname, wild)
-            if not cname:
+            if self.query.message.edns != -1:
+                self.response.use_edns(edns=0, payload=Prefs.EDNS_UDP_ADV,
+                                       request_payload=Prefs.EDNS_UDP_MAX)
+            elif self.query.message.edns > 0:
+                self.response.set_rcode(dns.rcode.BADVERS)
                 return
-            if cname in self.cname_list:
-                log_message("WARN: CNAME loop: %s." % self.cname_list)
-                return
-            if cname.is_subdomain(z.zone.origin):
-                self.find_answers(cname, qtype)
-            else:
-                self.answer_resolved = True
-                return
-
-    def make_response(self):
-
-        response = dns.message.make_response(self.query.message)
-        if not Prefs.EDNS:
-            response.use_edns(edns=False)
-        else:
-            if response.edns != -1:
-                response.payload = Prefs.UDP_ADV
-                if self.query.message.edns != 0:
-                    response.set_rcode(dns.rcode.BADVERS)
-                    return response
 
         if self.qclass != dns.rdataclass.IN:
-            response.set_rcode(dns.rcode.REFUSED)
-            return response
+            self.response.set_rcode(dns.rcode.REFUSED)
+            return
 
         if query_meta_type(self.qtype):
-            response.set_rcode(dns.rcode.NOTIMP)
-            return response
+            self.response.set_rcode(dns.rcode.NOTIMP)
 
-        if not self.qname.is_subdomain(z.zone.origin):
-            response.set_rcode(dns.rcode.REFUSED)
-            return response
+        self.find_answer(self.qname, self.qtype)
+        if (not self.is_referral) or self.response.answer:
+            self.response.flags |= dns.flags.AA
 
-        self.find_answers(self.qname, self.qtype)
-        response.flags |= dns.flags.AA
-        response.set_rcode(self.rcode)
-        response.answer = self.answer_rrsets
 
-        if not self.answer_resolved:
-            soa_rrset = self.soa_rrset()
-            soa_rrset.ttl = min(soa_rrset.ttl, soa_rrset[0].minimum)
-            response.authority = [soa_rrset]
+def find_zone(qname):
+    """Return closest enclosing zone object for the qname"""
 
-        return response
+    for zname in reversed(sorted(ZONEDICT.keys())):
+        if qname.is_subdomain(zname):
+            return ZONEDICT[zname]
+    return None
 
 
 def handle_query(query, sock):
+    """Handle incoming query"""
 
     if not query.message:
         return
 
     response = DNSresponse(query)
-    if not response.message:
+    if not response.response:
         return
 
     if query.tcp:
-        sendSocket(sock, response.wire_message)
+        send_socket(sock, response.wire_message)
     else:
         sock.sendto(response.wire_message,
                     (query.cliaddr, query.cliport))
 
 
 def handle_connection_udp(sock, rbufsize=2048):
+    """Handle UDP connection"""
+
     data, addrport = sock.recvfrom(rbufsize)
     cliaddr, cliport = addrport[0:2]
     if Prefs.DEBUG:
         log_message("UDP connection from (%s, %d) msgsize=%d" %
                     (cliaddr, cliport, len(data)))
-    q = DNSquery(data, cliaddr=cliaddr, cliport=cliport)
-    handle_query(q, sock)
+    query = DNSquery(data, cliaddr=cliaddr, cliport=cliport)
+    handle_query(query, sock)
 
 
 def handle_connection_tcp(sock, addr, rbufsize=2048):
+    """Handle TCP connection"""
+
     data = sock.recv(rbufsize)
     cliaddr, cliport = addr[0:2]
     if Prefs.DEBUG:
         log_message("TCP connection from (%s, %d) msgsize=%d" %
                     (cliaddr, cliport, len(data)))
-    q = DNSquery(data, cliaddr=cliaddr, cliport=cliport, tcp=True)
-    handle_query(q, sock)
+    query = DNSquery(data, cliaddr=cliaddr, cliport=cliport, tcp=True)
+    handle_query(query, sock)
     sock.close()
 
 
 def setup_sockets(family, server, port):
+    """Setup sockets for connection types and address families we handle"""
 
     fd_read = []
     dispatch = {}
@@ -573,27 +686,24 @@ def setup_sockets(family, server, port):
     return fd_read, dispatch
 
 
-if __name__ == '__main__':
+def main(arguments):
+    """Main function ..."""
 
-    process_args(sys.argv[1:])
-    z = Zone(Prefs.ZONEFILE)
+    process_args(arguments[1:])
 
     if Prefs.DAEMON:
         daemon(dirname=Prefs.WORKDIR)
 
     install_signal_handlers()
-
-    tlock = threading.Lock()
-    log_message("%s version %s: Serving DNS zone: %s" % \
-                (PROGNAME, VERSION, z.zone.origin))
+    log_message("{} version {}: running".format(PROGNAME, VERSION))
 
     try:
         fd_read, dispatch = setup_sockets(Prefs.SERVER_AF,
                                           Prefs.SERVER, Prefs.PORT)
-    except PermissionError as e:
-        log_fatal("Error setting up sockets: {}".format(e))
+    except PermissionError as exc_info:
+        log_fatal("Error setting up sockets: {}".format(exc_info))
 
-    if (Prefs.USERNAME or Prefs.GROUPNAME):
+    if Prefs.USERNAME or Prefs.GROUPNAME:
         drop_privs(Prefs.USERNAME, Prefs.GROUPNAME)
 
     log_message("Listening on UDP and TCP port %d" % Prefs.PORT)
@@ -601,26 +711,34 @@ if __name__ == '__main__':
     while True:
 
         try:
-            (ready_r, ready_w, ready_e) = select.select(fd_read, [], [], 5)
-        except select.error as e:
-            if e[0] == errno.EINTR:
-                continue
-            else:
-                log_message("ERROR: from select(): %s" % e)
-                sys.exit(1)
+            (ready_r, _, _) = select.select(fd_read, [], [], 5)
+        except OSError as exc_info:
+            log_message("ERROR: from select(): {}".format(exc_info))
+            sys.exit(1)
 
-        if ready_r:
-            for fd in ready_r:
-                for s in dispatch:
-                    if fd == s.fileno():
-                        handler, tcp = dispatch[s]
-                        if tcp:
-                            conn, addr = s.accept()
-                            threading.Thread(target=handler,
-                                             args=(conn, addr)).start()
-                        else:
-                            threading.Thread(target=handler,
-                                             args=(s,)).start()
+        if not ready_r:
+            continue
+
+        for fd in ready_r:
+            for sock in dispatch:
+                handler, is_tcp = dispatch[sock]
+                if fd == sock.fileno():
+                    if is_tcp:
+                        conn, addr = sock.accept()
+                        threading.Thread(target=handler,
+                                         args=(conn, addr)).start()
+                    else:
+                        threading.Thread(target=handler,
+                                         args=(sock,)).start()
 
         # Do something in the main thread here if needed
         #log_message("Heartbeat.")
+
+
+if __name__ == '__main__':
+
+    # Globals
+    ZONEDICT = {}
+    tlock = threading.Lock()
+
+    main(sys.argv)
