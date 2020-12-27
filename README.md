@@ -17,7 +17,7 @@ occasionally used for experimentation.
 ```
 $ adns_server.py -h
 Reading config from: adnsconfig.yaml
-adns_server.py version 0.2.0
+adns_server.py version 0.2.1
 Usage: adns_server.py [<Options>]
 
 Options:
@@ -46,17 +46,22 @@ An example configuration file looks like the following. At a minimum
 it needs so specify the "zones:" section, defining the zone names and
 zone files for each zone that the server will serve.
 
+The configuration file supports additional options beyond what can
+be specified via command line switches. Such as contents of the NSID
+option, etc.
+
 ```
 config:
   port: 5309
   user: "named"
   group: "named"
   edns: 1432
+  nsid: "dnstest.example.com"
 zones:
   - name: "example.com"
     file: "zonefile.example"
-  - name: "dnskensa.com"
-    file: "zonefile.dnskensa"
+  - name: "blah.com"
+    file: "zonefile.blah"
 ```
 
 
