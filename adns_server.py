@@ -30,28 +30,34 @@ import dns.rdataclass
 import dns.query
 import dns.edns
 
+from sortedcontainers import SortedDict
+
 
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION = '0.2.1'
+VERSION = '0.2.2'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
 
 
-class Prefs:
+class Preferences:
     """Preferences"""
-    CONFIG = CONFIG_DEFAULT           # -c: Configuration file
-    DEBUG = False                     # -d: Print debugging output
-    SERVER = ''                       # -s: server listening address
-    SERVER_AF = None                  # server's address family if -s set
-    PORT = 53                         # -p: port
-    USERNAME = None                   # username to switch to (if root)
-    GROUPNAME = None                  # group to switch to (if root)
-    DAEMON = True                     # Become daemon (-f: foreground)
-    SYSLOG_FAC = syslog.LOG_DAEMON    # Syslog facility
-    SYSLOG_PRI = syslog.LOG_INFO      # Syslog priority
-    WORKDIR = None                    # Working directory to change to
-    EDNS_UDP_MAX = 1432               # -e: Max EDNS UDP payload we send
-    EDNS_UDP_ADV = 1232               # Max EDNS UDP payload we advertise
-    NSID = None                       # NSID option string
+
+    config = CONFIG_DEFAULT           # -c: Configuration file
+    debug = False                     # -d: Print debugging output
+    server = ''                       # -s: server listening address
+    server_af = None                  # server's address family if -s set
+    port = 53                         # -p: port
+    username = None                   # username to switch to (if root)
+    groupname = None                  # group to switch to (if root)
+    daemon = True                     # Become daemon (-f: foreground)
+    syslog_fac = syslog.LOG_DAEMON    # Syslog facility
+    syslog_pri = syslog.LOG_INFO      # Syslog priority
+    workdir = None                    # Working directory to change to
+    edns_udp_max = 1432               # -e: Max EDNS UDP payload we send
+    edns_udp_adv = 1232               # Max EDNS UDP payload we advertise
+    nsid = None                       # NSID option string
+
+    def __str__(self):
+        return "<Preferences object>"
 
 
 def usage(msg=None):
@@ -89,10 +95,10 @@ must be present.
 def init_config(only_zones=False):
     """Initialize parameters and zone files from config file"""
 
-    global Prefs, ZONEDICT
+    global PREFS, ZONEDICT
 
     try:
-        ydoc = yaml.load(open(Prefs.CONFIG).read(), Loader=yaml.SafeLoader)
+        ydoc = yaml.load(open(PREFS.config).read(), Loader=yaml.SafeLoader)
     except FileNotFoundError as exc_info:
         print("error: {}".format(exc_info))
         sys.exit(1)
@@ -101,15 +107,15 @@ def init_config(only_zones=False):
         if "config" in ydoc:
             for key, val in ydoc['config'].items():
                 if key == 'port':
-                    Prefs.PORT = val
+                    PREFS.port = val
                 elif key == 'edns':
-                    Prefs.EDNS_UDP_MAX = val
+                    PREFS.edns_udp_max = val
                 elif key == 'user':
-                    Prefs.USERNAME = val
+                    PREFS.username = val
                 elif key == 'group':
-                    Prefs.GROUPNAME = val
+                    PREFS.groupname = val
                 elif key == 'nsid':
-                    Prefs.NSID = val.encode()
+                    PREFS.nsid = val.encode()
     if "zones" in ydoc:
         for entry in ydoc['zones']:
             zonename = entry['name']
@@ -129,20 +135,20 @@ def init_config(only_zones=False):
 def set_server_af(address):
     """Set server's address family"""
 
-    global Prefs
+    global PREFS
 
     if address.find('.') != -1:
-        Prefs.SERVER_AF = 'IPv4'
+        PREFS.server_af = 'IPv4'
     elif address.find(':') != -1:
-        Prefs.SERVER_AF = 'IPv6'
+        PREFS.server_af = 'IPv6'
     else:
-        raise ValueError("%s isn't a valid address" % address)
+        raise ValueError("{} isn't a valid address".format(address))
 
 
 def process_args(arguments):
     """Process all command line arguments"""
 
-    global Prefs
+    global PREFS
 
     try:
         (options, args) = getopt.getopt(arguments, 'hc:dp:s:z:u:g:46fe:')
@@ -154,38 +160,40 @@ def process_args(arguments):
 
     config_supplied = [x for x in options if x[0] == '-c']
     if config_supplied:
-        Prefs.CONFIG = config_supplied[0][1]
-    print("Reading config from: {}".format(Prefs.CONFIG))
+        PREFS.config = config_supplied[0][1]
+    print("Reading config from: {}".format(PREFS.config))
     init_config()
 
     for (opt, optval) in options:
         if opt == "-h":
             usage()
         elif opt == "-d":
-            Prefs.DEBUG = True
+            PREFS.debug = True
         elif opt == "-p":
-            Prefs.PORT = int(optval)
+            PREFS.port = int(optval)
         elif opt == "-s":
-            Prefs.SERVER = optval
+            PREFS.server = optval
             set_server_af(optval)
         elif opt == "-u":
-            Prefs.USERNAME = optval
+            PREFS.username = optval
         elif opt == "-g":
-            Prefs.GROUPNAME = optval
+            PREFS.groupname = optval
         elif opt == "-4":
-            Prefs.SERVER_AF = 'IPv4'
+            PREFS.server_af = 'IPv4'
         elif opt == "-6":
-            Prefs.SERVER_AF = 'IPv6'
+            PREFS.server_af = 'IPv6'
         elif opt == "-f":
-            Prefs.DAEMON = False
+            PREFS.daemon = False
         elif opt == "-e":
-            Prefs.EDNS_UDP_MAX = int(optval)
+            PREFS.edns_udp_max = int(optval)
 
 
 def log_message(msg):
     """log informational message"""
-    if Prefs.DAEMON:
-        syslog.syslog(Prefs.SYSLOG_PRI, msg)
+    global PREFS
+
+    if PREFS.daemon:
+        syslog.syslog(PREFS.syslog_pri, msg)
     else:
         tlock.acquire()
         print(msg)
@@ -314,12 +322,12 @@ def send_socket(sock, message):
         return True
 
 
-def recv_socket(sock, numOctets):
-    """Read and return numOctets of data from a connected socket"""
+def recv_socket(sock, num_octets):
+    """Read and return num_octets of data from a connected socket"""
     response = ""
     octets_read = 0
-    while octets_read < numOctets:
-        chunk = sock.recv(numOctets - octets_read)
+    while octets_read < num_octets:
+        chunk = sock.recv(num_octets - octets_read)
         chunklen = len(chunk)
         if chunklen == 0:
             return ""
@@ -328,51 +336,59 @@ def recv_socket(sock, numOctets):
     return response
 
 
-def add_dict_key(dictname, key):
-    """Add key to dictionary, if not already present"""
-    if key not in dictname:
-        dictname[key] = 1
+class Zone(dns.zone.Zone):
 
-
-class Zone:
     """
-    Zone object: contains a dns.zone.Zone object, modified to include
-    all empty non-terminals as explicit nodes. Otherwise, the dns.zone
-    module's find_node() method returns the wrong results for empty
-    non-terminals. TODO: I should really rewrite the zone data structure
-    as an actual tree.
+    Modified dns.zone.Zone class.
+    It uses the SortedDict class from sortedcontainers, rather than the
+    standard dict class. This maintains a sorted keylist, which makes
+    it easier to implement DNSSEC functions.
+    When add_ent_nodes() is called, it will iterate through the zone and
+    add all empty non-terminals as explicit nodes in the dictionary.
+    Fully qualified origin must be specified. Doesn't support relativized
+    names.
     """
 
-    def __init__(self, zonename, filename):
-        self.zonename = zonename
-        self.filename = filename
-        self.zone = dns.zone.from_file(filename,
-                                       origin=zonename,
-                                       relativize=False)
-        self.add_nodes(self.get_ent_nodes())
+    node_factory = dns.node.Node
+
+    __slots__ = ['rdclass', 'origin', 'nodes', 'relativize', 'ent_nodes']
+
+    def __init__(self, origin, rdclass=dns.rdataclass.IN, relativize=False):
+        """Initialize a zone object."""
+
+        super().__init__(origin, rdclass, relativize=relativize)
+        self.nodes = SortedDict()
+        self.ent_nodes = {}
 
     def get_ent_nodes(self):
-        ent_nodes = {}
-        for name, node in self.zone.items():
-            _ = node
-            if name == self.zone.origin:
-                continue
-            n = name
-            while True:
-                p = n.parent()
-                if p == self.zone.origin:
-                    break
-                if self.zone.get_node(p) is None:
-                    add_dict_key(ent_nodes, p)
-                n = p
-        return ent_nodes
+        """Find all empty non-terminals in the zone"""
 
-    def add_nodes(self, nodelist):
-        for entry in nodelist:
-            _ = self.zone.get_node(entry, create=True)
+        seen = {}
+        for name in self.keys():
+            if name == self.origin:
+                continue
+            current_name = name
+            while True:
+                if current_name in seen:
+                    break
+                seen[current_name] = 1
+                parent = current_name.parent()
+                if parent == self.origin:
+                    break
+                if self.get_node(parent) is None:
+                    self.ent_nodes[parent] = 1
+                current_name = parent
+
+    def add_ent_nodes(self):
+        """Add all empty non-terminals as explicits nodes in the Dict"""
+
+        self.get_ent_nodes()
+        for entry in self.ent_nodes:
+            node = self.node_factory()
+            self.nodes[entry] = node
 
     def __str__(self):
-        return "<Zone: {}".format(self.zonename)
+        return "<Zone: {}>".format(self.origin)
 
 
 class ZoneDict:
@@ -393,7 +409,11 @@ class ZoneDict:
     def add(self, zonename, zonefile):
         """Create and add zonename->zone object"""
         zonename = dns.name.from_text(zonename)
-        self.data[zonename] = Zone(zonename, zonefile)
+        self.data[zonename] = dns.zone.from_file(zonefile,
+                                                 origin=zonename,
+                                                 zone_factory=Zone,
+                                                 relativize=False)
+        self.data[zonename].add_ent_nodes()
 
     def find(self, qname):
         """Return closest enclosing zone object for the qname"""
@@ -486,9 +506,9 @@ class DNSresponse:
 
         if self.query.tcp:
             return 65533
-        if (Prefs.EDNS_UDP_MAX == 0) or (self.query.message.edns == -1):
+        if (PREFS.edns_udp_max == 0) or (self.query.message.edns == -1):
             return 512
-        return min(self.query.message.payload, Prefs.EDNS_UDP_MAX)
+        return min(self.query.message.payload, PREFS.edns_udp_max)
 
     def truncate(self):
         """Truncate response message"""
@@ -502,7 +522,7 @@ class DNSresponse:
     def add_soa(self, zobj):
         """Add SOA record to authority for negative responses"""
 
-        soa_rrset = zobj.zone.get_rrset(zobj.zone.origin, dns.rdatatype.SOA)
+        soa_rrset = zobj.get_rrset(zobj.origin, dns.rdatatype.SOA)
         soa_rrset.ttl = min(soa_rrset.ttl, soa_rrset[0].minimum)
         self.response.authority = [soa_rrset]
 
@@ -513,13 +533,13 @@ class DNSresponse:
 
         # If not CNAME, look for CNAME, and process it if found.
         if stype != dns.rdatatype.CNAME:
-            rdataset = zobj.zone.get_rdataset(sname, dns.rdatatype.CNAME)
+            rdataset = zobj.get_rdataset(sname, dns.rdatatype.CNAME)
             if rdataset:
                 self.process_cname(rrname, sname, stype, rdataset)
                 return True
 
         # Look for requested RRtype
-        rdataset = zobj.zone.get_rdataset(sname, stype)
+        rdataset = zobj.get_rdataset(sname, stype)
         if rdataset:
             rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN, stype)
             rrset.update(rdataset)
@@ -541,7 +561,7 @@ class DNSresponse:
             if not rdata.target.is_subdomain(sname):
                 continue
             for rrtype in (dns.rdatatype.A, dns.rdatatype.AAAA):
-                rdataset = zobj.zone.get_rdataset(rdata.target, rrtype)
+                rdataset = zobj.get_rdataset(rdata.target, rrtype)
                 if rdataset:
                     rrset = dns.rrset.RRset(rdata.target,
                                             dns.rdataclass.IN, rrtype)
@@ -594,11 +614,11 @@ class DNSresponse:
     def process_name(self, zobj, qname, sname, stype):
         """Process name and type"""
 
-        node = zobj.zone.get_node(sname)
+        node = zobj.get_node(sname)
         if node is None:
             # Look for wildcard
             wildcard = dns.name.Name((b'*',) + sname.labels[1:])
-            if zobj.zone.get_node(wildcard) is not None:
+            if zobj.get_node(wildcard) is not None:
                 return self.find_rrtype(zobj, wildcard, stype,
                                         wildcard_match=sname)
             self.response.set_rcode(dns.rcode.NXDOMAIN)
@@ -606,14 +626,14 @@ class DNSresponse:
             return True
 
         # Look for DNAME
-        dname_rdataset = zobj.zone.get_rdataset(sname, dns.rdatatype.DNAME)
+        dname_rdataset = zobj.get_rdataset(sname, dns.rdatatype.DNAME)
         if dname_rdataset:
             self.process_dname(qname, sname, stype, dname_rdataset)
             return True
 
         # Look for delegation
-        if sname != zobj.zone.origin:
-            rdataset = zobj.zone.get_rdataset(sname, dns.rdatatype.NS)
+        if sname != zobj.origin:
+            rdataset = zobj.get_rdataset(sname, dns.rdatatype.NS)
             if rdataset:
                 self.do_referral(zobj, sname, rdataset)
                 return True
@@ -626,7 +646,7 @@ class DNSresponse:
     def find_answer_in_zone(self, zobj, qname, qtype):
         """Find answer for name and type in given zone"""
 
-        zone_name = zobj.zone.origin
+        zone_name = zobj.origin
         label_list = list(qname.relativize(zone_name).labels)
 
         current_name = zone_name
@@ -638,7 +658,7 @@ class DNSresponse:
             current_name = dns.name.Name((label,) + current_name.labels)
 
     def find_answer(self, qname, qtype):
-        """Fine answer for name and type"""
+        """Find answer for name and type"""
 
         global ZONEDICT
         zobj = ZONEDICT.find(qname)
@@ -651,19 +671,19 @@ class DNSresponse:
     def need_edns(self):
         """Do we need to add EDNS Opt RR?"""
 
-        return (Prefs.EDNS_UDP_MAX != 0) and (self.query.message.edns != -1)
+        return (PREFS.edns_udp_max != 0) and (self.query.message.edns != -1)
 
     def do_edns(self):
         """Generate EDNS response information"""
 
         options = []
         for option in self.query.message.options:
-            if Prefs.NSID and (option.otype == dns.edns.NSID):
+            if PREFS.nsid and (option.otype == dns.edns.NSID):
                 options.append(dns.edns.GenericOption(dns.edns.NSID,
-                                                      Prefs.NSID))
+                                                      PREFS.nsid))
         self.response.use_edns(edns=0,
-                               payload=Prefs.EDNS_UDP_ADV,
-                               request_payload=Prefs.EDNS_UDP_MAX,
+                               payload=PREFS.edns_udp_adv,
+                               request_payload=PREFS.edns_udp_max,
                                options=options)
 
     def prepare_response(self):
@@ -711,7 +731,7 @@ def handle_connection_udp(sock, rbufsize=2048):
 
     data, addrport = sock.recvfrom(rbufsize)
     cliaddr, cliport = addrport[0:2]
-    if Prefs.DEBUG:
+    if PREFS.debug:
         log_message("connect: UDP from (%s, %d) msgsize=%d" %
                     (cliaddr, cliport, len(data)))
     query = DNSquery(data, cliaddr=cliaddr, cliport=cliport)
@@ -723,7 +743,7 @@ def handle_connection_tcp(sock, addr, rbufsize=2048):
 
     data = sock.recv(rbufsize)
     cliaddr, cliport = addr[0:2]
-    if Prefs.DEBUG:
+    if PREFS.debug:
         log_message("connect: TCP from (%s, %d) msgsize=%d" %
                     (cliaddr, cliport, len(data)))
     query = DNSquery(data, cliaddr=cliaddr, cliport=cliport, tcp=True)
@@ -759,24 +779,24 @@ def setup_sockets(family, server, port):
 def main(arguments):
     """Main function ..."""
 
-    global Prefs
+    global PREFS
 
     process_args(arguments[1:])
-    if Prefs.DAEMON:
-        daemon(dirname=Prefs.WORKDIR)
+    if PREFS.daemon:
+        daemon(dirname=PREFS.workdir)
     install_signal_handlers()
     log_message("info: {} version {}: running".format(PROGNAME, VERSION))
 
     try:
-        fd_read, dispatch = setup_sockets(Prefs.SERVER_AF,
-                                          Prefs.SERVER, Prefs.PORT)
+        fd_read, dispatch = setup_sockets(PREFS.server_af,
+                                          PREFS.server, PREFS.port)
     except PermissionError as exc_info:
         log_fatal("Error setting up sockets: {}".format(exc_info))
 
-    if Prefs.USERNAME or Prefs.GROUPNAME:
-        drop_privs(Prefs.USERNAME, Prefs.GROUPNAME)
+    if PREFS.username or PREFS.groupname:
+        drop_privs(PREFS.username, PREFS.groupname)
 
-    log_message("info: Listening on UDP and TCP port %d" % Prefs.PORT)
+    log_message("info: Listening on UDP and TCP port %d" % PREFS.port)
 
     while True:
 
@@ -808,6 +828,7 @@ def main(arguments):
 if __name__ == '__main__':
 
     # Globals
+    PREFS = Preferences()
     ZONEDICT = ZoneDict()
     tlock = threading.Lock()
 

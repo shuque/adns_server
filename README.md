@@ -17,7 +17,7 @@ occasionally used for experimentation.
 ```
 $ adns_server.py -h
 Reading config from: adnsconfig.yaml
-adns_server.py version 0.2.1
+adns_server.py version 0.2.2
 Usage: adns_server.py [<Options>]
 
 Options:
@@ -64,17 +64,6 @@ zones:
     file: "zonefile.blah"
 ```
 
-
-### Notes
-
-* dnspython's dns.zone.Zone class uses a python dictionary (i.e. hash table)
-  to store DNS nodes, and furthermore only stores nodes with associated
-  RRsets. This makes it very inefficient for certain important tasks, such
-  as locating empty non-terminals and DNAME records. To partially workaround
-  this, I use a wrapper class (Zone) that modifies the zone object to
-  explicitly search for and include all the empty non-terminals as explicit
-  nodes. In some future version of this program, I will re-implement the
-  zone with an actual tree data structure.
 
 ### TODO list
 
