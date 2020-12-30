@@ -56,6 +56,7 @@ config:
   user: "named"
   group: "named"
   edns: 1432
+  minimal_any: false
   nsid: "dnstest.example.com"
 zones:
   - name: "example.com"

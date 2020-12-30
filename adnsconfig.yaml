@@ -3,6 +3,7 @@ config:
   user: "named"
   group: "named"
   edns: 1432
+  minimal-any: false
 zones:
   - name: "example.com"
     file: "zonefile"

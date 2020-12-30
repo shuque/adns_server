@@ -55,6 +55,7 @@ class Preferences:
     edns_udp_max = 1432               # -e: Max EDNS UDP payload we send
     edns_udp_adv = 1232               # Max EDNS UDP payload we advertise
     nsid = None                       # NSID option string
+    minimal_any = False               # Minimal ANY (RFC 8482)
 
     def __str__(self):
         return "<Preferences object>"
@@ -116,6 +117,11 @@ def init_config(only_zones=False):
                     PREFS.groupname = val
                 elif key == 'nsid':
                     PREFS.nsid = val.encode()
+                elif key == 'minimal_any':
+                    PREFS.minimal_any = val
+                else:
+                    print("error: unrecognized config option: {}".format(key))
+                    sys.exit(1)
     if "zones" in ydoc:
         for entry in ydoc['zones']:
             zonename = entry['name']
@@ -123,12 +129,12 @@ def init_config(only_zones=False):
             try:
                 ZONEDICT.add(zonename, zonefile)
             except dns.exception.DNSException as exc_info:
-                print("ERROR: load zone {} failed: {}".format(
+                print("error: load zone {} failed: {}".format(
                     zonename, exc_info))
                 sys.exit(1)
         ZONEDICT.set_zonelist()
     if not ZONEDICT.get_zonelist():
-        print("ERROR: no zones defined.")
+        print("error: no zones defined.")
         sys.exit(1)
 
 
@@ -424,8 +430,8 @@ class ZoneDict:
 
 
 def query_meta_type(qtype):
-    """Is given query type a meta type?"""
-    return 128 <= qtype <= 255
+    """Is given query type a meta type (except ANY)?"""
+    return 128 <= qtype <= 254
 
 
 class DNSquery:
@@ -526,10 +532,38 @@ class DNSresponse:
         soa_rrset.ttl = min(soa_rrset.ttl, soa_rrset[0].minimum)
         self.response.authority = [soa_rrset]
 
+    def process_any_metatype(self, zobj, sname, wildcard_match):
+        """Process ANY meta query"""
+
+        global PREFS
+
+        rrname = wildcard_match if wildcard_match else sname
+        rdatasets = zobj.get_node(sname).rdatasets
+        if not rdatasets:
+            self.add_soa(zobj)
+            return
+
+        if PREFS.minimal_any:
+            rdataset = rdatasets[0]
+            rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN, rdataset.rdtype)
+            rrset.update(rdataset)
+            self.response.answer.append(rrset)
+            return
+
+        for rdataset in rdatasets:
+            rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN, rdataset.rdtype)
+            rrset.update(rdataset)
+            self.response.answer.append(rrset)
+
     def find_rrtype(self, zobj, sname, stype, wildcard_match=None):
         """Find RRtype for given name, with CNAME processing if needed"""
 
         rrname = wildcard_match if wildcard_match else sname
+
+        # ANY
+        if stype == dns.rdatatype.ANY:
+            self.process_any_metatype(zobj, sname, wildcard_match)
+            return True
 
         # If not CNAME, look for CNAME, and process it if found.
         if stype != dns.rdatatype.CNAME:
