@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-A Toy Authoritative DNS server for experimentation.
+An Authoritative DNS server for prototyping and experimentation.
 
 Author: Shumon Huque <shuque@gmail.com>
 
@@ -18,6 +18,8 @@ import socket
 import select
 import threading
 import signal
+import hashlib
+import base64
 import yaml
 
 import dns.zone
@@ -34,7 +36,7 @@ from sortedcontainers import SortedDict
 
 
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION = '0.2.2'
+VERSION = '0.3.0'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
 
 
@@ -126,8 +128,9 @@ def init_config(only_zones=False):
         for entry in ydoc['zones']:
             zonename = entry['name']
             zonefile = entry['file']
+            dnssec = entry.get('dnssec', False)
             try:
-                ZONEDICT.add(zonename, zonefile)
+                ZONEDICT.add(zonename, zonefile, dnssec=dnssec)
             except dns.exception.DNSException as exc_info:
                 print("error: load zone {} failed: {}".format(
                     zonename, exc_info))
@@ -250,9 +253,9 @@ def daemon(dirname=None, syslog_fac=syslog.LOG_DAEMON):
         os.umask(umask_value)
         os.setsid()
 
-        for fd in range(0, os.sysconf("SC_OPEN_MAX")):
+        for file_desc in range(0, os.sysconf("SC_OPEN_MAX")):
             try:
-                os.close(fd)
+                os.close(file_desc)
             except OSError:
                 pass
 
@@ -353,11 +356,13 @@ class Zone(dns.zone.Zone):
     add all empty non-terminals as explicit nodes in the dictionary.
     Fully qualified origin must be specified. Doesn't support relativized
     names.
+    Supports methods for obtaining NSEC3/NSEC records for constructing
+    authenticated denial of existence responses.
     """
 
     node_factory = dns.node.Node
 
-    __slots__ = ['rdclass', 'origin', 'nodes', 'relativize', 'ent_nodes']
+    __slots__ = ['ent_nodes', 'dnssec', 'nsec3param']
 
     def __init__(self, origin, rdclass=dns.rdataclass.IN, relativize=False):
         """Initialize a zone object."""
@@ -365,6 +370,17 @@ class Zone(dns.zone.Zone):
         super().__init__(origin, rdclass, relativize=relativize)
         self.nodes = SortedDict()
         self.ent_nodes = {}
+        self.dnssec = False
+        self.nsec3param = None
+
+    def init_dnssec(self):
+        """set DNSSEC parameters"""
+
+        self.dnssec = True
+        rdataset = self.get_rdataset(self.origin, dns.rdatatype.NSEC3PARAM)
+        if rdataset and len(rdataset) > 1:
+            raise ValueError("Only 1 NSEC3PARAM record is supported")
+        self.nsec3param = rdataset
 
     def get_ent_nodes(self):
         """Find all empty non-terminals in the zone"""
@@ -393,6 +409,46 @@ class Zone(dns.zone.Zone):
             node = self.node_factory()
             self.nodes[entry] = node
 
+    def nsec3_hash(self, name):
+        """Return NSEC3 hash of name"""
+
+        params = self.nsec3param[0]
+        return nsec3hash(name,
+                         params.algorithm, params.salt, params.iterations)
+
+    def nsec3_matching(self, name):
+        """Return NSEC3 RRset matching the name"""
+
+        if not self.nsec3param:
+            return None
+
+        n3hash = self.nsec3_hash(name)
+        owner = dns.name.Name((n3hash.encode(),) + self.origin.labels)
+        return self.get_rrset(owner, dns.rdatatype.NSEC3)
+
+    def nsec3_covering(self, name):
+        """Return NSEC3 RRset covering the name"""
+
+        if not self.nsec3param:
+            return None
+
+        n3hash = self.nsec3_hash(name)
+        owner = dns.name.Name((n3hash.encode(),) + self.origin.labels)
+        search_index = self.nodes.bisect(owner) - 1
+        while True:
+            name, node = self.nodes.peekitem(search_index)
+            rdataset = node.get_rdataset(dns.rdataclass.IN,
+                                         dns.rdatatype.NSEC3)
+            if rdataset:
+                rrset = dns.rrset.RRset(name, dns.rdataclass.IN,
+                                        rdataset.rdtype)
+                rrset.update(rdataset)
+                return rrset
+            search_index -= 1
+            if search_index < 0:
+                break
+        return None
+
     def __str__(self):
         return "<Zone: {}>".format(self.origin)
 
@@ -412,7 +468,7 @@ class ZoneDict:
         """Return zone list"""
         return self.zonelist
 
-    def add(self, zonename, zonefile):
+    def add(self, zonename, zonefile, dnssec=False):
         """Create and add zonename->zone object"""
         zonename = dns.name.from_text(zonename)
         self.data[zonename] = dns.zone.from_file(zonefile,
@@ -420,6 +476,8 @@ class ZoneDict:
                                                  zone_factory=Zone,
                                                  relativize=False)
         self.data[zonename].add_ent_nodes()
+        if dnssec:
+            self.data[zonename].init_dnssec()
 
     def find(self, qname):
         """Return closest enclosing zone object for the qname"""
@@ -427,6 +485,36 @@ class ZoneDict:
             if qname.is_subdomain(zname):
                 return self.data[zname]
         return None
+
+
+B32_TO_EXT_HEX = bytes.maketrans(b'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567',
+                                 b'0123456789ABCDEFGHIJKLMNOPQRSTUV')
+
+def hashalg(algnum):
+    """Return hash function corresponding to hash algorithm number"""
+
+    if algnum == 1:
+        return hashlib.sha1
+    raise ValueError("unsupported NSEC3 hash algorithm {}".format(algnum))
+
+
+def nsec3hash(name, algnum, wire_salt, iterations, binary_out=False):
+
+    """Compute NSEC3 hash for given domain name and parameters"""
+
+    if iterations < 0:
+        raise ValueError("iterations must be >= 0")
+    wire_name = name.to_digestable()
+    hashfunc = hashalg(algnum)
+    digest = wire_name
+    while iterations >= 0:
+        digest = hashfunc(digest + wire_salt).digest()
+        iterations -= 1
+    if binary_out:
+        return digest
+    output = base64.b32encode(digest)
+    output = output.translate(B32_TO_EXT_HEX).decode()
+    return output
 
 
 def query_meta_type(qtype):
@@ -485,14 +573,14 @@ class DNSresponse:
         self.qtype = query.message.question[0].rdtype
         self.qclass = query.message.question[0].rdclass
 
-        self.response = dns.message.make_response(query.message)
-        self.response.set_rcode(dns.rcode.NOERROR)
         self.is_referral = False
         self.cname_owner_list = []
         self.dname_owner_list = []
+        self.is_nodata = False
 
+        self.response = dns.message.make_response(query.message)
+        self.response.set_rcode(dns.rcode.NOERROR)
         self.prepare_response()
-        ## self.wire_message = self.to_wire()
 
     def to_wire(self):
         """Generate wire format DNS response"""
@@ -525,64 +613,135 @@ class DNSresponse:
         self.response.additional = []
         return self.response.to_wire()
 
+    def add_rrset(self, zobj, section, rrset, wildcard=None):
+        """Add RRset to section, fetching RRsigs if needed"""
+
+        section.append(rrset)
+
+        if zobj.dnssec and self.dnssec_ok():
+            rrname = wildcard if wildcard else rrset.name
+            rdataset = zobj.get_rdataset(rrname,
+                                         dns.rdatatype.RRSIG,
+                                         covers=rrset.rdtype)
+            if rdataset:
+                rrsig = dns.rrset.RRset(rrset.name,
+                                        dns.rdataclass.IN, rdataset.rdtype)
+                rrsig.update(rdataset)
+                section.append(rrsig)
+
     def add_soa(self, zobj):
         """Add SOA record to authority for negative responses"""
 
         soa_rrset = zobj.get_rrset(zobj.origin, dns.rdatatype.SOA)
         soa_rrset.ttl = min(soa_rrset.ttl, soa_rrset[0].minimum)
-        self.response.authority = [soa_rrset]
+        self.add_rrset(zobj, self.response.authority, soa_rrset)
 
-    def process_any_metatype(self, zobj, sname, wildcard_match):
+    def nxdomain(self, zobj, sname):
+        """Generate NXDOMAIN response"""
+
+        n3_list = []
+        self.response.set_rcode(dns.rcode.NXDOMAIN)
+        self.add_soa(zobj)
+        if zobj.dnssec and self.dnssec_ok():
+            closest_encloser = sname.parent()
+            n3_closest_encloser = zobj.nsec3_matching(closest_encloser)
+            next_closer = sname
+            n3_next_closer = zobj.nsec3_covering(next_closer)
+            wildcard = dns.name.Name((b'*',) + sname.parent().labels)
+            n3_wildcard = zobj.nsec3_covering(wildcard)
+            if n3_closest_encloser not in n3_list:
+                n3_list.append(n3_closest_encloser)
+            if n3_next_closer not in n3_list:
+                n3_list.append(n3_next_closer)
+            if n3_wildcard not in n3_list:
+                n3_list.append(n3_wildcard)
+            for entry in n3_list:
+                self.add_rrset(zobj, self.response.authority, entry)
+
+    def nodata(self, zobj, qname, wildcard=None):
+        """Generate NODATA response"""
+
+        self.add_soa(zobj)
+        if zobj.dnssec and self.dnssec_ok():
+            n3_rrset = zobj.nsec3_matching(qname)
+            if n3_rrset:
+                self.add_rrset(zobj, self.response.authority, n3_rrset)
+            if wildcard:
+                n3_wild = zobj.nsec3_covering(wildcard)
+                if n3_wild:
+                    self.add_rrset(zobj, self.response.authority, n3_wild)
+                n3_closest = zobj.nsec3_matching(qname.parent())
+                if n3_closest:
+                    self.add_rrset(zobj, self.response.authority, n3_closest)
+
+    def wildcard_no_closer_match(self, zobj, wildcard, stype):
+        """Wildcard no closer match proof"""
+        _ = wildcard
+        if zobj.dnssec and self.dnssec_ok():
+            n3_rrset = zobj.nsec3_covering(stype)
+            if n3_rrset:
+                self.add_rrset(zobj, self.response.authority, n3_rrset)
+
+    def process_any_metatype(self, zobj, sname, wildcard):
         """Process ANY meta query"""
 
         global PREFS
 
-        rrname = wildcard_match if wildcard_match else sname
+        rrname = wildcard if wildcard else sname
         rdatasets = zobj.get_node(sname).rdatasets
         if not rdatasets:
-            self.add_soa(zobj)
+            self.is_nodata = True
+            self.nodata(zobj, sname, wildcard)
             return
 
         if PREFS.minimal_any:
-            rdataset = rdatasets[0]
-            rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN, rdataset.rdtype)
-            rrset.update(rdataset)
-            self.response.answer.append(rrset)
-            return
+            for rdataset in rdatasets:
+                if rdataset.rdtype == dns.rdatatype.RRSIG:
+                    continue
+                rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN,
+                                        rdataset.rdtype)
+                rrset.update(rdataset)
+                self.add_rrset(zobj, self.response.answer, rrset)
+                return
 
         for rdataset in rdatasets:
+            if rdataset.rdtype == dns.rdatatype.RRSIG:
+                continue
             rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN, rdataset.rdtype)
             rrset.update(rdataset)
-            self.response.answer.append(rrset)
+            self.add_rrset(zobj, self.response.answer, rrset)
 
-    def find_rrtype(self, zobj, sname, stype, wildcard_match=None):
+    def find_rrtype(self, zobj, sname, stype, wildcard=None):
         """Find RRtype for given name, with CNAME processing if needed"""
 
-        rrname = wildcard_match if wildcard_match else sname
+        rrname = self.qname if wildcard else sname
 
         # ANY
         if stype == dns.rdatatype.ANY:
-            self.process_any_metatype(zobj, sname, wildcard_match)
-            return True
+            self.process_any_metatype(zobj, sname, wildcard)
+            return
 
         # If not CNAME, look for CNAME, and process it if found.
         if stype != dns.rdatatype.CNAME:
             rdataset = zobj.get_rdataset(sname, dns.rdatatype.CNAME)
             if rdataset:
-                self.process_cname(rrname, sname, stype, rdataset)
-                return True
+                self.process_cname(zobj, rrname, sname, stype, rdataset,
+                                   wildcard=wildcard)
+                return
 
         # Look for requested RRtype
         rdataset = zobj.get_rdataset(sname, stype)
         if rdataset:
             rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN, stype)
             rrset.update(rdataset)
-            self.response.answer.append(rrset)
-            return True
+            self.add_rrset(zobj, self.response.answer, rrset,
+                           wildcard=sname if wildcard else None)
+            return
 
         # NODATA - add SOA
-        self.add_soa(zobj)
-        return True
+        self.is_nodata = True
+        self.nodata(zobj, sname, wildcard)
+        return
 
     def do_referral(self, zobj, sname, rdataset):
         """Generate referral response to child zone"""
@@ -590,7 +749,7 @@ class DNSresponse:
         self.is_referral = True
         ns_rrset = dns.rrset.RRset(sname, dns.rdataclass.IN, dns.rdatatype.NS)
         ns_rrset.update(rdataset)
-        self.response.authority.append(ns_rrset)
+        self.add_rrset(zobj, self.response.authority, ns_rrset)
         for rdata in rdataset:
             if not rdata.target.is_subdomain(sname):
                 continue
@@ -600,9 +759,10 @@ class DNSresponse:
                     rrset = dns.rrset.RRset(rdata.target,
                                             dns.rdataclass.IN, rrtype)
                     rrset.update(rdataset)
-                    self.response.additional.append(rrset)
+                    self.add_rrset(zobj, self.response.additional, rrset)
 
-    def process_cname(self, rrname, sname, stype, cname_rdataset):
+    def process_cname(self, zobj, rrname, sname, stype, cname_rdataset,
+                      wildcard=None):
         """Process CNAME"""
 
         if sname in self.cname_owner_list:
@@ -613,10 +773,11 @@ class DNSresponse:
         rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN,
                                 dns.rdatatype.CNAME)
         rrset.update(cname_rdataset)
-        self.response.answer.append(rrset)
+        self.add_rrset(zobj, self.response.answer, rrset,
+                       wildcard=sname if wildcard else None)
         self.find_answer(cname_rdataset[0].target, stype)
 
-    def process_dname(self, qname, sname, stype, dname_rdataset):
+    def process_dname(self, zobj, qname, sname, stype, dname_rdataset):
         """Process DNAME"""
 
         if sname in self.dname_owner_list:
@@ -626,7 +787,8 @@ class DNSresponse:
         self.dname_owner_list.append(sname)
         rrset = dns.rrset.RRset(sname, dns.rdataclass.IN, dns.rdatatype.DNAME)
         rrset.update(dname_rdataset)
-        self.response.answer.append(rrset)
+        self.add_rrset(zobj, self.response.answer, rrset)
+
         dname_target = dname_rdataset[0].target
         try:
             cname_target = dns.name.Name(
@@ -642,7 +804,7 @@ class DNSresponse:
                                                   dns.rdatatype.CNAME,
                                                   cname_target)
         rdataset.add(cname_rdata)
-        self.process_cname(qname, qname, stype, rdataset)
+        self.process_cname(zobj, qname, qname, stype, rdataset)
         return
 
     def process_name(self, zobj, qname, sname, stype):
@@ -651,18 +813,19 @@ class DNSresponse:
         node = zobj.get_node(sname)
         if node is None:
             # Look for wildcard
-            wildcard = dns.name.Name((b'*',) + sname.labels[1:])
-            if zobj.get_node(wildcard) is not None:
-                return self.find_rrtype(zobj, wildcard, stype,
-                                        wildcard_match=sname)
-            self.response.set_rcode(dns.rcode.NXDOMAIN)
-            self.add_soa(zobj)
+            wildcard_name = dns.name.Name((b'*',) + sname.labels[1:])
+            if zobj.get_node(wildcard_name) is not None:
+                self.find_rrtype(zobj, wildcard_name, stype, wildcard=sname)
+                if not self.is_nodata:
+                    self.wildcard_no_closer_match(zobj, wildcard_name, sname)
+                return True
+            self.nxdomain(zobj, sname)
             return True
 
         # Look for DNAME
         dname_rdataset = zobj.get_rdataset(sname, dns.rdatatype.DNAME)
         if dname_rdataset:
-            self.process_dname(qname, sname, stype, dname_rdataset)
+            self.process_dname(zobj, qname, sname, stype, dname_rdataset)
             return True
 
         # Look for delegation
@@ -672,10 +835,11 @@ class DNSresponse:
                 self.do_referral(zobj, sname, rdataset)
                 return True
 
-        if sname != qname:
-            return False
+        if sname == qname:
+            self.find_rrtype(zobj, sname, stype)
+            return True
 
-        return self.find_rrtype(zobj, sname, stype)
+        return False
 
     def find_answer_in_zone(self, zobj, qname, qtype):
         """Find answer for name and type in given zone"""
@@ -701,6 +865,11 @@ class DNSresponse:
                 self.response.set_rcode(dns.rcode.REFUSED)
             return
         self.find_answer_in_zone(zobj, qname, qtype)
+
+    def dnssec_ok(self):
+        """Does requestor have the DO flag set?"""
+
+        return self.query.message.ednsflags & dns.flags.DO == dns.flags.DO
 
     def need_edns(self):
         """Do we need to add EDNS Opt RR?"""
@@ -843,10 +1012,10 @@ def main(arguments):
         if not ready_r:
             continue
 
-        for fd in ready_r:
+        for file_desc in ready_r:
             for sock in dispatch:
                 handler, is_tcp = dispatch[sock]
-                if fd == sock.fileno():
+                if file_desc == sock.fileno():
                     if is_tcp:
                         conn, addr = sock.accept()
                         threading.Thread(target=handler,
@@ -854,9 +1023,6 @@ def main(arguments):
                     else:
                         threading.Thread(target=handler,
                                          args=(sock,)).start()
-
-        # Do something in the main thread here if needed
-        #log_message("Heartbeat.")
 
 
 if __name__ == '__main__':

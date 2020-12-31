@@ -1,9 +1,8 @@
 # adns_server
-Version 0.2.0
-A toy authoritative DNS server for experiments
+Version 0.3.0
 
 A quick and dirty Python authoritative DNS server, that I've
-occasionally used for experimentation.
+occasionally used for experimentation and prototyping.
 
 ### Pre-requisites
 
@@ -17,7 +16,7 @@ occasionally used for experimentation.
 ```
 $ adns_server.py -h
 Reading config from: adnsconfig.yaml
-adns_server.py version 0.2.2
+adns_server.py version 0.3.0
 Usage: adns_server.py [<Options>]
 
 Options:
@@ -62,12 +61,18 @@ zones:
   - name: "example.com"
     file: "zonefile.example"
   - name: "blah.com"
+    dnssec: true
     file: "zonefile.blah"
 ```
 
+### DNSSEC support
+
+The program can serve pre-signed NSEC3 DNSSEC zones (e.g. zones generated
+with an offline signer like BIND's dnssec-signzone). The 'dnssec: true'
+parameter must be specified in the configuration file for such zones.
 
 ### TODO list
 
-* Implement some EDNS options
+* Implement support for NSEC
+* Implement some more EDNS options: cookies, extended error, etc.
 * Support Zone Transfer
-* Support DNSSEC
