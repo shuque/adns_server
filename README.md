@@ -1,5 +1,5 @@
 # adns_server
-Version 0.3.0
+Version 0.3.1
 
 A quick and dirty Python authoritative DNS server, that I've
 occasionally used for experimentation and prototyping.
@@ -16,7 +16,7 @@ occasionally used for experimentation and prototyping.
 ```
 $ adns_server.py -h
 Reading config from: adnsconfig.yaml
-adns_server.py version 0.3.0
+adns_server.py version 0.3.1
 Usage: adns_server.py [<Options>]
 
 Options:

@@ -36,7 +36,7 @@ from sortedcontainers import SortedDict
 
 
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION = '0.3.0'
+VERSION = '0.3.1'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
 
 
@@ -416,14 +416,19 @@ class Zone(dns.zone.Zone):
         return nsec3hash(name,
                          params.algorithm, params.salt, params.iterations)
 
+    def nsec3_hashed_owner(self, name):
+        """Return NSEC3 hashed owner name"""
+
+        n3hash = self.nsec3_hash(name)
+        owner = dns.name.Name((n3hash.encode(),) + self.origin.labels)
+        return owner
+
     def nsec3_matching(self, name):
         """Return NSEC3 RRset matching the name"""
 
         if not self.nsec3param:
             return None
-
-        n3hash = self.nsec3_hash(name)
-        owner = dns.name.Name((n3hash.encode(),) + self.origin.labels)
+        owner = self.nsec3_hashed_owner(name)
         return self.get_rrset(owner, dns.rdatatype.NSEC3)
 
     def nsec3_covering(self, name):
@@ -432,8 +437,7 @@ class Zone(dns.zone.Zone):
         if not self.nsec3param:
             return None
 
-        n3hash = self.nsec3_hash(name)
-        owner = dns.name.Name((n3hash.encode(),) + self.origin.labels)
+        owner = self.nsec3_hashed_owner(name)
         search_index = self.nodes.bisect(owner) - 1
         while True:
             name, node = self.nodes.peekitem(search_index)
@@ -760,6 +764,15 @@ class DNSresponse:
                                             dns.rdataclass.IN, rrtype)
                     rrset.update(rdataset)
                     self.add_rrset(zobj, self.response.additional, rrset)
+
+        if zobj.dnssec and self.dnssec_ok():
+            ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
+            if ds_rrset:
+                self.add_rrset(zobj, self.response.authority, ds_rrset)
+            else:
+                n3_rrset = zobj.nsec3_matching(sname)
+                if n3_rrset:
+                    self.add_rrset(zobj, self.response.authority, n3_rrset)
 
     def process_cname(self, zobj, rrname, sname, stype, cname_rdataset,
                       wildcard=None):
