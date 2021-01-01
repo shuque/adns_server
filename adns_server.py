@@ -36,7 +36,7 @@ from sortedcontainers import SortedDict
 
 
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION = '0.3.1'
+VERSION = '0.3.2'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
 
 
@@ -409,6 +409,18 @@ class Zone(dns.zone.Zone):
             node = self.node_factory()
             self.nodes[entry] = node
 
+    def nsec_matching(self, name):
+        """Return NSEC RRset matching the name"""
+
+        return self.get_rrset(name, dns.rdatatype.NSEC)
+
+    def nsec_covering(self, name):
+        """Return NSEC RRset covering the name"""
+
+        position = self.nodes.bisect_left(name)
+        nsec_name = self.nodes.peekitem(position-1)[0]
+        return self.get_rrset(nsec_name, dns.rdatatype.NSEC)
+
     def nsec3_hash(self, name):
         """Return NSEC3 hash of name"""
 
@@ -621,6 +633,9 @@ class DNSresponse:
     def add_rrset(self, zobj, section, rrset, wildcard=None):
         """Add RRset to section, fetching RRsigs if needed"""
 
+        if rrset in section:
+            return
+
         section.append(rrset)
 
         if zobj.dnssec and self.dnssec_ok():
@@ -644,48 +659,94 @@ class DNSresponse:
     def nxdomain(self, zobj, sname):
         """Generate NXDOMAIN response"""
 
-        n3_list = []
         self.response.set_rcode(dns.rcode.NXDOMAIN)
         self.add_soa(zobj)
         if zobj.dnssec and self.dnssec_ok():
-            closest_encloser = sname.parent()
-            n3_closest_encloser = zobj.nsec3_matching(closest_encloser)
-            next_closer = sname
-            n3_next_closer = zobj.nsec3_covering(next_closer)
-            wildcard = dns.name.Name((b'*',) + sname.parent().labels)
-            n3_wildcard = zobj.nsec3_covering(wildcard)
-            if n3_closest_encloser not in n3_list:
-                n3_list.append(n3_closest_encloser)
-            if n3_next_closer not in n3_list:
-                n3_list.append(n3_next_closer)
-            if n3_wildcard not in n3_list:
-                n3_list.append(n3_wildcard)
-            for entry in n3_list:
-                self.add_rrset(zobj, self.response.authority, entry)
+            if zobj.nsec3param is None:
+                self.nxdomain_nsec(zobj, sname)
+            else:
+                self.nxdomain_nsec3(zobj, sname)
 
-    def nodata(self, zobj, qname, wildcard=None):
+    def nxdomain_nsec(self, zobj, sname):
+        """Generate NSEC NXDOMAIN response"""
+
+        qname_cover = zobj.nsec_covering(sname)
+        if qname_cover:
+            self.add_rrset(zobj, self.response.authority, qname_cover)
+        wildcard = dns.name.Name((b'*',) + sname.parent().labels)
+        wildcard_cover = zobj.nsec_covering(wildcard)
+        if wildcard_cover:
+            self.add_rrset(zobj, self.response.authority, wildcard_cover)
+
+    def nxdomain_nsec3(self, zobj, sname):
+        """Generate NSEC3 NXDOMAIN response"""
+
+        closest_encloser = sname.parent()
+        n3_closest_encloser = zobj.nsec3_matching(closest_encloser)
+        self.add_rrset(zobj, self.response.authority, n3_closest_encloser)
+
+        next_closer = sname
+        n3_next_closer = zobj.nsec3_covering(next_closer)
+        self.add_rrset(zobj, self.response.authority, n3_next_closer)
+
+        wildcard = dns.name.Name((b'*',) + sname.parent().labels)
+        n3_wildcard = zobj.nsec3_covering(wildcard)
+        self.add_rrset(zobj, self.response.authority, n3_wildcard)
+
+    def nodata(self, zobj, sname, wildcard=None):
         """Generate NODATA response"""
 
         self.add_soa(zobj)
         if zobj.dnssec and self.dnssec_ok():
-            n3_rrset = zobj.nsec3_matching(qname)
-            if n3_rrset:
-                self.add_rrset(zobj, self.response.authority, n3_rrset)
-            if wildcard:
-                n3_wild = zobj.nsec3_covering(wildcard)
-                if n3_wild:
-                    self.add_rrset(zobj, self.response.authority, n3_wild)
-                n3_closest = zobj.nsec3_matching(qname.parent())
-                if n3_closest:
-                    self.add_rrset(zobj, self.response.authority, n3_closest)
+            if zobj.nsec3param is None:
+                self.nodata_nsec(zobj, sname, wildcard=wildcard)
+            else:
+                self.nodata_nsec3(zobj, sname, wildcard=wildcard)
+
+    def nodata_nsec(self, zobj, sname, wildcard=None):
+        """Generate NSEC NODATA response"""
+
+        nsec_rrset = zobj.nsec_matching(sname)
+        if nsec_rrset:
+            self.add_rrset(zobj, self.response.authority, nsec_rrset)
+        else:
+            # Empty Non-Terminal case
+            nsec_rrset = zobj.nsec_covering(sname)
+            if nsec_rrset:
+                self.add_rrset(zobj, self.response.authority, nsec_rrset)
+
+        if wildcard:
+            _ = wildcard
+            no_closer = zobj.nsec_covering(wildcard)
+            if no_closer:
+                self.add_rrset(zobj, self.response.authority, no_closer)
+
+    def nodata_nsec3(self, zobj, sname, wildcard=None):
+        """Generate NSEC3 NODATA response"""
+
+        n3_rrset = zobj.nsec3_matching(sname)
+        if n3_rrset:
+            self.add_rrset(zobj, self.response.authority, n3_rrset)
+        if wildcard:
+            n3_wild = zobj.nsec3_covering(wildcard)
+            if n3_wild:
+                self.add_rrset(zobj, self.response.authority, n3_wild)
+            n3_closest = zobj.nsec3_matching(sname.parent())
+            if n3_closest:
+                self.add_rrset(zobj, self.response.authority, n3_closest)
 
     def wildcard_no_closer_match(self, zobj, wildcard, stype):
         """Wildcard no closer match proof"""
         _ = wildcard
         if zobj.dnssec and self.dnssec_ok():
-            n3_rrset = zobj.nsec3_covering(stype)
-            if n3_rrset:
-                self.add_rrset(zobj, self.response.authority, n3_rrset)
+            if zobj.nsec3param is None:
+                n1_rrset = zobj.nsec_covering(stype)
+                if n1_rrset:
+                    self.add_rrset(zobj, self.response.authority, n1_rrset)
+            else:
+                n3_rrset = zobj.nsec3_covering(stype)
+                if n3_rrset:
+                    self.add_rrset(zobj, self.response.authority, n3_rrset)
 
     def process_any_metatype(self, zobj, sname, wildcard):
         """Process ANY meta query"""
@@ -771,9 +832,14 @@ class DNSresponse:
             if ds_rrset:
                 self.add_rrset(zobj, self.response.authority, ds_rrset)
             else:
-                n3_rrset = zobj.nsec3_matching(sname)
-                if n3_rrset:
-                    self.add_rrset(zobj, self.response.authority, n3_rrset)
+                if zobj.nsec3param is None:
+                    n1_rrset = zobj.nsec_matching(sname)
+                    if n1_rrset:
+                        self.add_rrset(zobj, self.response.authority, n1_rrset)
+                else:
+                    n3_rrset = zobj.nsec3_matching(sname)
+                    if n3_rrset:
+                        self.add_rrset(zobj, self.response.authority, n3_rrset)
 
     def process_cname(self, zobj, rrname, sname, stype, cname_rdataset,
                       wildcard=None):
@@ -830,8 +896,7 @@ class DNSresponse:
             wildcard_name = dns.name.Name((b'*',) + sname.labels[1:])
             if zobj.get_node(wildcard_name) is not None:
                 self.find_rrtype(zobj, wildcard_name, stype, wildcard=sname)
-                if not self.is_nodata:
-                    self.wildcard_no_closer_match(zobj, wildcard_name, sname)
+                self.wildcard_no_closer_match(zobj, wildcard_name, sname)
                 return True
             self.nxdomain(zobj, sname)
             return True
