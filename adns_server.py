@@ -584,6 +584,7 @@ class DNSresponse:
 
         self.response = dns.message.make_response(query.message)
         self.response.set_rcode(dns.rcode.NOERROR)
+        self.response.flags &= ~dns.flags.AA
         self.prepare_response()
 
     def to_wire(self):
@@ -921,8 +922,10 @@ class DNSresponse:
             self.response.set_rcode(dns.rcode.NOTIMP)
 
         self.find_answer(self.qname, self.qtype)
-        if (not self.is_referral) or self.response.answer:
-            self.response.flags |= dns.flags.AA
+
+        if self.response.rcode() in [dns.rcode.NOERROR, dns.rcode.NXDOMAIN]:
+            if (not self.is_referral) or self.response.answer:
+                self.response.flags |= dns.flags.AA
 
 
 def handle_query(query, sock):
