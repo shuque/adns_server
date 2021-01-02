@@ -469,6 +469,17 @@ class Zone(dns.zone.Zone):
         return "<Zone: {}>".format(self.origin)
 
 
+def zone_from_file(name, zonefile, dnssec=False):
+    """Obtain Zone object from zone name and file"""
+
+    zone = dns.zone.from_file(zonefile, origin=name, zone_factory=Zone,
+                              relativize=False)
+    zone.add_ent_nodes()
+    if dnssec:
+        zone.init_dnssec()
+    return zone
+
+
 class ZoneDict:
     """Zone Dictionary object: zone names -> zone objects"""
 
@@ -487,13 +498,7 @@ class ZoneDict:
     def add(self, zonename, zonefile, dnssec=False):
         """Create and add zonename->zone object"""
         zonename = dns.name.from_text(zonename)
-        self.data[zonename] = dns.zone.from_file(zonefile,
-                                                 origin=zonename,
-                                                 zone_factory=Zone,
-                                                 relativize=False)
-        self.data[zonename].add_ent_nodes()
-        if dnssec:
-            self.data[zonename].init_dnssec()
+        self.data[zonename] = zone_from_file(zonename, zonefile, dnssec)
 
     def find(self, qname):
         """Return closest enclosing zone object for the qname"""
@@ -716,7 +721,6 @@ class DNSresponse:
                 self.add_rrset(zobj, self.response.authority, nsec_rrset)
 
         if wildcard:
-            _ = wildcard
             no_closer = zobj.nsec_covering(wildcard)
             if no_closer:
                 self.add_rrset(zobj, self.response.authority, no_closer)
