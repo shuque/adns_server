@@ -474,6 +474,12 @@ def zone_from_file(name, zonefile, dnssec=False):
 
     zone = dns.zone.from_file(zonefile, origin=name, zone_factory=Zone,
                               relativize=False)
+    # My custom Zone factory class converts the nodes attribute to a
+    # SortedDict (to make it easier to implement DNSSEC functions).
+    # Unfortunately dnspython 2.x undoes that conversion back to a dict.
+    # So we need to do this.
+    if not isinstance(zone.nodes, SortedDict):
+        zone.nodes = SortedDict(zone.nodes)
     zone.add_ent_nodes()
     if dnssec:
         zone.init_dnssec()
