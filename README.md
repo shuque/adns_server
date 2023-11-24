@@ -1,21 +1,43 @@
 # adns_server
 
-A quick and dirty Python authoritative DNS server, that I've
-occasionally used for experimentation and prototyping.
+This is a fully functional authoritative DNS server written in Python.
+I mainly use it for functional testing and prototyping new protocol
+features. It is not intended for production use or high performance
+applications.
+
+It serves DNS zones in master file format (e.g. BIND format). For DNSSEC,
+it can serve pre-signed master file format zones, both NSEC and NSEC3 (e.g.
+zones generated with an offline signer like BIND's dnssec-signzone). It
+can also perform online signing with a combined signing key using the
+[Compact Denial of Existence](https://datatracker.ietf.org/doc/draft-ietf-dnsop-compact-denial-of-existence/) method.
+
+The 'dnssec: true' parameter must be specified in the configuration file
+for signed zones. The 'dynamic_signing: true' and 'private_key: /path/to/privatekey.pem'
+options are needed for online signing.
+
 
 ### Pre-requisites
 
 * Python 3
-* The dnspython module (http://www.dnspython.org/)
+* Python Cryptography module
+* The dnspython module, version 2.3 or greater
+* sortedcontainers
 * PyYAML module
 
+These can usually be installed via pip:
+```
+pip install cryptography
+pip install 'dnspython>=2.3'
+pip install sortedcontainers
+pip install pyyaml
+```
 
 ### Usage
 
 ```
 $ adns_server.py -h
 Reading config from: adnsconfig.yaml
-adns_server.py version 0.3.2
+adns_server.py version 0.4.0
 Usage: adns_server.py [<Options>]
 
 Options:
@@ -46,7 +68,7 @@ zone files for each zone that the server will serve.
 
 The configuration file supports additional options beyond what can
 be specified via command line switches. Such as contents of the NSID
-option, etc.
+option, DNSSEC parameters, etc.
 
 ```
 config:
@@ -59,15 +81,12 @@ config:
 zones:
   - name: "example.com"
     file: "zonefile.example"
-  - name: "blah.com"
+  - name: "signedzone.com"
     dnssec: true
-    file: "zonefile.blah"
+    file: "zonefile.signedzone"
+  - name "onlinesigning.com"
+    dnssec: true
+    file "zonefile.onlinesigning"
+    dynamic_signing: true
+    private_key: "/path/to/privatekey.pem"
 ```
-
-### DNSSEC support
-
-The program supports serving pre-signed DNSSEC zones, both NSEC and
-NSEC3 variants (e.g. zones generated with an offline signer like BIND's
-dnssec-signzone). The 'dnssec: true' parameter must be specified in the
-configuration file for signed zones.
-

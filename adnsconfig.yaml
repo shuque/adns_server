@@ -3,7 +3,15 @@ config:
   user: "named"
   group: "named"
   edns: 1432
-  minimal-any: false
+  minimal_any: false
 zones:
   - name: "example.com"
-    file: "zonefile"
+    file: "zones/example.com/zonefile"
+  - name: "example.org"
+    file: "zones/example.org/zonefile"
+    dnssec: true
+  - name: "example.net"
+    file: "zones/example.net/zonefile"
+    dnssec: true
+    dynamic_signing: true
+    private_key: "zones/example.net/privkey.pem"

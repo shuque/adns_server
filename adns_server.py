@@ -20,6 +20,7 @@ import threading
 import signal
 import hashlib
 import base64
+import time
 import yaml
 
 import dns.zone
@@ -31,13 +32,23 @@ import dns.rdatatype
 import dns.rdataclass
 import dns.query
 import dns.edns
+import dns.dnssec
+from dns.rdtypes.ANY.NSEC import NSEC, Bitmap
 
 from sortedcontainers import SortedDict
 
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
 
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION = '0.3.2'
+VERSION = '0.4.0'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
+
+# Parameters for online signing with Compact Answers
+RRSIG_INCEPTION_OFFSET = 3600
+RRSIG_LIFETIME = 172800
+NXNAME_TYPE = 65283            # NXNAME Pseudo RR type
+EDNS_FLAG_CO = 0x4000          # Compact Answer OK (CO) EDNS Header Flag
 
 
 class Preferences:
@@ -100,11 +111,8 @@ def init_config(only_zones=False):
 
     global PREFS, ZONEDICT
 
-    try:
-        ydoc = yaml.load(open(PREFS.config).read(), Loader=yaml.SafeLoader)
-    except FileNotFoundError as exc_info:
-        print("error: {}".format(exc_info))
-        sys.exit(1)
+    with open(PREFS.config, 'r') as configfile:
+        ydoc = yaml.safe_load(configfile)
 
     if not only_zones:
         if "config" in ydoc:
@@ -129,8 +137,13 @@ def init_config(only_zones=False):
             zonename = entry['name']
             zonefile = entry['file']
             dnssec = entry.get('dnssec', False)
+            dynamic_signing = entry.get('dynamic_signing', False)
+            if dnssec and dynamic_signing:
+                privatekey = load_private_key(entry['private_key'])
+            else:
+                privatekey = None
             try:
-                ZONEDICT.add(zonename, zonefile, dnssec=dnssec)
+                ZONEDICT.add(zonename, zonefile, dnssec=dnssec, key=privatekey)
             except dns.exception.DNSException as exc_info:
                 print("error: load zone {} failed: {}".format(
                     zonename, exc_info))
@@ -167,6 +180,10 @@ def process_args(arguments):
     if args:
         usage("No additional arguments allowed: {}".format(" ".join(args)))
 
+    help_requested = [x for x in options if x[0] == '-h']
+    if help_requested:
+        usage()
+
     config_supplied = [x for x in options if x[0] == '-c']
     if config_supplied:
         PREFS.config = config_supplied[0][1]
@@ -174,9 +191,7 @@ def process_args(arguments):
     init_config()
 
     for (opt, optval) in options:
-        if opt == "-h":
-            usage()
-        elif opt == "-d":
+        if opt == "-d":
             PREFS.debug = True
         elif opt == "-p":
             PREFS.port = int(optval)
@@ -204,9 +219,8 @@ def log_message(msg):
     if PREFS.daemon:
         syslog.syslog(PREFS.syslog_pri, msg)
     else:
-        tlock.acquire()
-        print(msg)
-        tlock.release()
+        with tlock:
+            print(msg)
 
 
 def log_fatal(msg):
@@ -345,6 +359,15 @@ def recv_socket(sock, num_octets):
     return response
 
 
+def load_private_key(keyfile):
+    """
+    Load DNSSEC private key from PEM format file for online signing.
+    """
+    with open(keyfile, 'rb') as fkeyfile:
+        return load_pem_private_key(fkeyfile.read(), password=None)
+    return None
+
+
 class Zone(dns.zone.Zone):
 
     """
@@ -362,7 +385,14 @@ class Zone(dns.zone.Zone):
 
     node_factory = dns.node.Node
 
-    __slots__ = ['ent_nodes', 'dnssec', 'nsec3param']
+    __slots__ = [
+        'ent_nodes',
+        'dnssec',
+        'privatekey',
+        'signing_dnskey',
+        'keytag',
+        'nsec3param'
+    ]
 
     def __init__(self, origin, rdclass=dns.rdataclass.IN, relativize=False):
         """Initialize a zone object."""
@@ -371,7 +401,11 @@ class Zone(dns.zone.Zone):
         self.nodes = SortedDict()
         self.ent_nodes = {}
         self.dnssec = False
+        self.privatekey = None
+        self.signing_dnskey = None
+        self.keytag = None
         self.nsec3param = None
+        self.soa_min_ttl = None
 
     def init_dnssec(self):
         """set DNSSEC parameters"""
@@ -381,6 +415,22 @@ class Zone(dns.zone.Zone):
         if rdataset and len(rdataset) > 1:
             raise ValueError("Only 1 NSEC3PARAM record is supported")
         self.nsec3param = rdataset
+
+    def init_key(self, privatekey):
+        """Initialize key for online signing"""
+        self.privatekey = privatekey
+        self.signing_dnskey = self.get_rdataset(self.origin,
+                                                dns.rdatatype.DNSKEY)[0]
+        self.keytag = dns.dnssec.key_id(self.signing_dnskey)
+
+    def set_soa_min_ttl(self):
+        """Calculate SOA min TTL value"""
+        soa_rrset = self.get_rrset(self.origin, dns.rdatatype.SOA)
+        self.soa_min_ttl = min(soa_rrset.ttl, soa_rrset[0].minimum)
+
+    def online_signing(self):
+        """Does this zone utilize online signing?"""
+        return self.dnssec and (self.privatekey is not None)
 
     def get_ent_nodes(self):
         """Find all empty non-terminals in the zone"""
@@ -469,7 +519,7 @@ class Zone(dns.zone.Zone):
         return "<Zone: {}>".format(self.origin)
 
 
-def zone_from_file(name, zonefile, dnssec=False):
+def zone_from_file(name, zonefile, dnssec=False, key=None):
     """Obtain Zone object from zone name and file"""
 
     zone = dns.zone.from_file(zonefile, origin=name, zone_factory=Zone,
@@ -481,8 +531,11 @@ def zone_from_file(name, zonefile, dnssec=False):
     if not isinstance(zone.nodes, SortedDict):
         zone.nodes = SortedDict(zone.nodes)
     zone.add_ent_nodes()
+    zone.set_soa_min_ttl()
     if dnssec:
         zone.init_dnssec()
+        if key is not None:
+            zone.init_key(key)
     return zone
 
 
@@ -501,10 +554,10 @@ class ZoneDict:
         """Return zone list"""
         return self.zonelist
 
-    def add(self, zonename, zonefile, dnssec=False):
+    def add(self, zonename, zonefile, dnssec=False, key=None):
         """Create and add zonename->zone object"""
         zonename = dns.name.from_text(zonename)
-        self.data[zonename] = zone_from_file(zonename, zonefile, dnssec)
+        self.data[zonename] = zone_from_file(zonename, zonefile, dnssec, key)
 
     def find(self, qname):
         """Return closest enclosing zone object for the qname"""
@@ -547,6 +600,48 @@ def nsec3hash(name, algnum, wire_salt, iterations, binary_out=False):
 def query_meta_type(qtype):
     """Is given query type a meta type (except ANY)?"""
     return 128 <= qtype <= 254
+
+
+def compact_answer_ok(message):
+    """Does DNS message have Compact Answers OK EDNS header flag set?"""
+    return message.ednsflags & EDNS_FLAG_CO == EDNS_FLAG_CO
+
+
+def sign_rrset(zone, rrset):
+    """Sign RRset with zone's private key and return RRSIG record"""
+    rrsig_rdata = dns.dnssec.sign(rrset,
+                                  zone.privatekey,
+                                  zone.origin,
+                                  zone.signing_dnskey,
+                                  inception=int(time.time() - RRSIG_INCEPTION_OFFSET),
+                                  lifetime=RRSIG_LIFETIME)
+    rrsig = dns.rrset.RRset(rrset.name,
+                            dns.rdataclass.IN,
+                            dns.rdatatype.RRSIG)
+    rrsig_rdataset = dns.rdataset.Rdataset(dns.rdataclass.IN,
+                                           dns.rdatatype.RRSIG,
+                                           ttl=rrset.ttl)
+    rrsig_rdataset.add(rrsig_rdata)
+    rrsig.update(rrsig_rdataset)
+    return rrsig
+
+
+def make_nsec_rrset(owner, nextname, rrtypes, ttl):
+    """Create NSEC RRset from components"""
+
+    rdata = NSEC(rdclass=dns.rdataclass.IN,
+                 rdtype=dns.rdatatype.NSEC,
+                 next=nextname,
+                 windows=Bitmap.from_rdtypes(rrtypes))
+    rrset = dns.rrset.RRset(owner,
+                            dns.rdataclass.IN,
+                            dns.rdatatype.NSEC)
+    rdataset = dns.rdataset.Rdataset(dns.rdataclass.IN,
+                                     dns.rdatatype.NSEC,
+                                     ttl=ttl)
+    rdataset.add(rdata)
+    rrset.update(rdataset)
+    return rrset
 
 
 class DNSquery:
@@ -641,7 +736,7 @@ class DNSresponse:
         self.response.additional = []
         return self.response.to_wire()
 
-    def add_rrset(self, zobj, section, rrset, wildcard=None):
+    def add_rrset(self, zobj, section, rrset, wildcard=None, authoritative=True):
         """Add RRset to section, fetching RRsigs if needed"""
 
         if rrset in section:
@@ -649,7 +744,18 @@ class DNSresponse:
 
         section.append(rrset)
 
-        if zobj.dnssec and self.dnssec_ok():
+        if not authoritative:
+            return
+
+        if not self.dnssec_ok():
+            return
+
+        if zobj.online_signing():
+            rrsig = sign_rrset(zobj, rrset)
+            section.append(rrsig)
+            return
+
+        if zobj.dnssec:
             rrname = wildcard if wildcard else rrset.name
             rdataset = zobj.get_rdataset(rrname,
                                          dns.rdatatype.RRSIG,
@@ -664,19 +770,39 @@ class DNSresponse:
         """Add SOA record to authority for negative responses"""
 
         soa_rrset = zobj.get_rrset(zobj.origin, dns.rdatatype.SOA)
-        soa_rrset.ttl = min(soa_rrset.ttl, soa_rrset[0].minimum)
+        soa_rrset.ttl = zobj.soa_min_ttl
         self.add_rrset(zobj, self.response.authority, soa_rrset)
 
     def nxdomain(self, zobj, sname):
         """Generate NXDOMAIN response"""
 
-        self.response.set_rcode(dns.rcode.NXDOMAIN)
+        if not zobj.online_signing():
+            self.response.set_rcode(dns.rcode.NXDOMAIN)
+
         self.add_soa(zobj)
-        if zobj.dnssec and self.dnssec_ok():
+        if not self.dnssec_ok():
+            return
+
+        if zobj.online_signing():
+            self.nxdomain_online(zobj, sname)
+            return
+
+        if zobj.dnssec:
             if zobj.nsec3param is None:
                 self.nxdomain_nsec(zobj, sname)
             else:
                 self.nxdomain_nsec3(zobj, sname)
+
+    def nxdomain_online(self, zobj, sname):
+        """
+        Generate online NSEC NXDOMAIN response using Compact Denial
+        """
+        if compact_answer_ok(self.query.message):
+            self.response.set_rcode(dns.rcode.NXDOMAIN)
+        rrtypes = [dns.rdatatype.RRSIG, dns.rdatatype.NSEC, NXNAME_TYPE]
+        nextname = dns.name.Name((b'\x00',) + sname.labels)
+        nsec_rrset = make_nsec_rrset(sname, nextname, rrtypes, zobj.soa_min_ttl)
+        self.add_rrset(zobj, self.response.authority, nsec_rrset)
 
     def nxdomain_nsec(self, zobj, sname):
         """Generate NSEC NXDOMAIN response"""
@@ -708,11 +834,34 @@ class DNSresponse:
         """Generate NODATA response"""
 
         self.add_soa(zobj)
-        if zobj.dnssec and self.dnssec_ok():
+        if not self.dnssec_ok():
+            return
+
+        if zobj.online_signing():
+            self.nodata_online(zobj, sname, wildcard)
+            return
+
+        if zobj.dnssec:
             if zobj.nsec3param is None:
                 self.nodata_nsec(zobj, sname, wildcard=wildcard)
             else:
                 self.nodata_nsec3(zobj, sname, wildcard=wildcard)
+
+    def nodata_online(self, zobj, sname, wildcard=None):
+        """
+        Generate online NSEC NODATA response
+        """
+        if wildcard:
+            nextname = dns.name.Name((b'\x00',) + self.qname.labels)
+            owner = self.qname
+        else:
+            nextname = dns.name.Name((b'\x00',) + sname.labels)
+            owner = sname
+        node = zobj.find_node(sname)
+        rrtypes = [x.rdtype for x in node.rdatasets] + \
+            [dns.rdatatype.RRSIG, dns.rdatatype.NSEC]
+        nsec_rrset = make_nsec_rrset(owner, nextname, rrtypes, zobj.soa_min_ttl)
+        self.add_rrset(zobj, self.response.authority, nsec_rrset)
 
     def nodata_nsec(self, zobj, sname, wildcard=None):
         """Generate NSEC NODATA response"""
@@ -825,7 +974,7 @@ class DNSresponse:
         self.is_referral = True
         ns_rrset = dns.rrset.RRset(sname, dns.rdataclass.IN, dns.rdatatype.NS)
         ns_rrset.update(rdataset)
-        self.add_rrset(zobj, self.response.authority, ns_rrset)
+        self.add_rrset(zobj, self.response.authority, ns_rrset, authoritative=False)
         for rdata in rdataset:
             if not rdata.target.is_subdomain(sname):
                 continue
@@ -835,14 +984,17 @@ class DNSresponse:
                     rrset = dns.rrset.RRset(rdata.target,
                                             dns.rdataclass.IN, rrtype)
                     rrset.update(rdataset)
-                    self.add_rrset(zobj, self.response.additional, rrset)
+                    self.add_rrset(zobj, self.response.additional, rrset, authoritative=False)
 
         if zobj.dnssec and self.dnssec_ok():
             ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
             if ds_rrset:
                 self.add_rrset(zobj, self.response.authority, ds_rrset)
             else:
-                if zobj.nsec3param is None:
+                # Insecure referral. Add NSEC record matching qname
+                if zobj.online_signing():
+                    self.insecure_referral_online(zobj, sname)
+                elif zobj.nsec3param is None:
                     n1_rrset = zobj.nsec_matching(sname)
                     if n1_rrset:
                         self.add_rrset(zobj, self.response.authority, n1_rrset)
@@ -850,6 +1002,16 @@ class DNSresponse:
                     n3_rrset = zobj.nsec3_matching(sname)
                     if n3_rrset:
                         self.add_rrset(zobj, self.response.authority, n3_rrset)
+
+    def insecure_referral_online(self, zobj, sname):
+        """Generate online NSEC RRset for insecure referral"""
+
+        nextname = dns.name.Name((b'\x00',) + sname.labels)
+        node = zobj.find_node(sname)
+        rrtypes = [x.rdtype for x in node.rdatasets] + \
+            [dns.rdatatype.RRSIG, dns.rdatatype.NSEC]
+        nsec_rrset = make_nsec_rrset(sname, nextname, rrtypes, zobj.soa_min_ttl)
+        self.add_rrset(zobj, self.response.authority, nsec_rrset)
 
     def process_cname(self, zobj, rrname, sname, stype, cname_rdataset,
                       wildcard=None):
@@ -968,12 +1130,19 @@ class DNSresponse:
     def do_edns(self):
         """Generate EDNS response information"""
 
+        ednsflags = 0
+        if self.dnssec_ok():
+            ednsflags = dns.flags.DO
+            if compact_answer_ok(self.query.message):
+                ednsflags |= EDNS_FLAG_CO
+
         options = []
         for option in self.query.message.options:
             if PREFS.nsid and (option.otype == dns.edns.NSID):
                 options.append(dns.edns.GenericOption(dns.edns.NSID,
                                                       PREFS.nsid))
         self.response.use_edns(edns=0,
+                               ednsflags=ednsflags,
                                payload=PREFS.edns_udp_adv,
                                request_payload=PREFS.edns_udp_max,
                                options=options)
@@ -993,8 +1162,9 @@ class DNSresponse:
             self.response.set_rcode(dns.rcode.REFUSED)
             return
 
-        if query_meta_type(self.qtype):
-            self.response.set_rcode(dns.rcode.NOTIMP)
+        if query_meta_type(self.qtype) or self.qtype == NXNAME_TYPE:
+            self.response.set_rcode(dns.rcode.REFUSED)
+            return
 
         self.find_answer(self.qname, self.qtype)
 
@@ -1049,7 +1219,7 @@ def setup_sockets(family, server, port):
     """Setup sockets for connection types and address families we handle"""
 
     fd_read = []
-    dispatch = {}
+    dispatch = {} # dict: socket -> (handler, is_tcp)
 
     if family is None or family == 'IPv4':
         s_udp4 = udp4socket(server, port)
@@ -1097,15 +1267,13 @@ def main(arguments):
         try:
             (ready_r, _, _) = select.select(fd_read, [], [], 5)
         except OSError as exc_info:
-            log_message("error: from select(): {}".format(exc_info))
-            sys.exit(1)
+            log_fatal("error: from select(): {}".format(exc_info))
 
         if not ready_r:
             continue
 
         for file_desc in ready_r:
-            for sock in dispatch:
-                handler, is_tcp = dispatch[sock]
+            for (sock, (handler, is_tcp)) in dispatch.items():
                 if file_desc == sock.fileno():
                     if is_tcp:
                         conn, addr = sock.accept()
