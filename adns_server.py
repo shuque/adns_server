@@ -674,15 +674,31 @@ class DNSquery:
             self.qclass = self.message.question[0].rdclass
             self.log_query()
 
+    def edns_log_info(self):
+        """Return string of EDNS parameters for logging purposes"""
+        edns_version = self.message.edns
+        if edns_version == -1:
+            return ""
+        flags = "0x%04x" % self.message.ednsflags
+        options = ",".join([str(int(x.otype)) for x in self.message.options])
+        result = f"edns=v{edns_version}/{flags}/{self.message.payload}"
+        if options:
+            result += f"/{options}"
+        return result
+
     def log_query(self):
         """Log information about incoming DNS query"""
         transport = "TCP" if self.tcp else "UDP"
-        log_message('query: %s %s %s %s from: %s,%d size=%d' % \
-                        (transport,
-                         self.qname,
-                         dns.rdatatype.to_text(self.qtype),
-                         dns.rdataclass.to_text(self.qclass),
-                         self.cliaddr, self.cliport, self.msg_len))
+        msg = 'query: %s %s %s %s from: %s,%d size=%d' % \
+            (transport,
+             self.qname,
+             dns.rdatatype.to_text(self.qtype),
+             dns.rdataclass.to_text(self.qclass),
+             self.cliaddr, self.cliport, self.msg_len)
+        edns_log_message = self.edns_log_info()
+        if edns_log_message:
+            msg = msg + " " + edns_log_message
+        log_message(msg)
 
 
 class DNSresponse:
