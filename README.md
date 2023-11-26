@@ -90,3 +90,44 @@ zones:
     dynamic_signing: true
     private_key: "/path/to/privatekey.pem"
 ```
+
+### Key Generation for Online Signing
+
+This repo also includes a small script, genkey.pl, to help generate
+DNSSEC keys used for online signing configurations.
+
+```
+$ ./genkey.py -h
+usage: genkey.py [-h] [-a N] [-f N] zone
+
+positional arguments:
+  zone        DNS zone name
+
+optional arguments:
+  -h, --help  show this help message and exit
+  -a N        DNSSEC algorithm number (default: 13)
+  -f N        Value of DNSKEY flags field (default: 257)
+  ```
+
+  An example usage to generate an ECDSA NIST P256 (algorithm 13)
+  key for example.com follows.
+
+  ```
+  $ ./genkey.py example.com
+### Private Key file contents:
+-----BEGIN PRIVATE KEY-----
+XXXXXXX+++++++++++++++++++++REDACTEDKEY+++++++++++++++++XXXXXXXX
+XXXXXXX+++++++++++++++++++++REDACTEDKEY+++++++++++++++++XXXXXXXX
+XXXXXXX+++++++++++++++++++++REDACTEDKEY+++++++++XXXXXXXX
+-----END PRIVATE KEY-----
+
+### DNSKEY RDATA:
+257 3 13 oBQvOkuVPdp7Wes6EcWra7UlyI3u9EeM nRd79CSmq4ggIobc7oVPxTq3NhespdTC hZ4gArRqrftxjsUxjP0dOQ==
+### DNSKEY keytag: 56959
+
+### DNSKEY RRset:
+example.com. 7200 IN DNSKEY 257 3 13 oBQvOkuVPdp7Wes6EcWra7UlyI3u9EeM nRd79CSmq4ggIobc7oVPxTq3NhespdTC hZ4gArRqrftxjsUxjP0dOQ==
+
+### DS record
+56959 13 2 ac2c59edcb0d9021d6898e2824cd63fd67c3d8c0b6da69943121b5b5263bdbad
+```
