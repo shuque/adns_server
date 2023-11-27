@@ -652,6 +652,7 @@ class DNSquery:
         self.malformed = False
         self.cliaddr = cliaddr
         self.cliport = cliport
+        self.malformed = None
 
         self.tcp = tcp
         if self.tcp:
@@ -669,6 +670,11 @@ class DNSquery:
             self.message = None
             self.malformed = True
         else:
+            if not self.message.question:
+                self.malformed = True
+                self.txid = self.message.id
+                log_message(f"empty question from {self.cliaddr}")
+                return
             self.qname = self.message.question[0].name
             self.qtype = self.message.question[0].rdtype
             self.qclass = self.message.question[0].rdclass
@@ -707,6 +713,13 @@ class DNSresponse:
     def __init__(self, query):
 
         self.query = query
+        self.response = dns.message.make_response(query.message,
+                                                  our_payload=PREFS.edns_udp_adv)
+
+        if self.query.malformed:
+            self.response.set_rcode(dns.rcode.FORMERR)
+            return
+
         self.qname = query.message.question[0].name
         self.qtype = query.message.question[0].rdtype
         self.qclass = query.message.question[0].rdclass
@@ -715,8 +728,9 @@ class DNSresponse:
         self.cname_owner_list = []
         self.dname_owner_list = []
         self.is_nodata = False
+        self.edns_flags = 0
+        self.edns_options = []
 
-        self.response = dns.message.make_response(query.message)
         self.response.set_rcode(dns.rcode.NOERROR)
         self.response.flags &= ~dns.flags.AA
         self.prepare_response()
@@ -1130,6 +1144,11 @@ class DNSresponse:
         if zobj is None:
             if not self.response.answer:
                 self.response.set_rcode(dns.rcode.REFUSED)
+                if self.query.message.edns != -1:
+                    option = dns.edns.EDEOption(
+                        dns.edns.EDECode.NOT_AUTHORITATIVE,
+                        "Not authoritative for queried zone")
+                    self.edns_options.append(option)
             return
         self.find_answer_in_zone(zobj, qname, qtype)
 
@@ -1143,25 +1162,27 @@ class DNSresponse:
 
         return (PREFS.edns_udp_max != 0) and (self.query.message.edns != -1)
 
-    def do_edns(self):
-        """Generate EDNS response information"""
+    def do_edns_init(self):
+        """Generate initial EDNS response information"""
 
-        ednsflags = 0
         if self.dnssec_ok():
-            ednsflags = dns.flags.DO
+            self.edns_flags = dns.flags.DO
             if compact_answer_ok(self.query.message):
-                ednsflags |= EDNS_FLAG_CO
+                self.edns_flags |= EDNS_FLAG_CO
 
-        options = []
         for option in self.query.message.options:
             if PREFS.nsid and (option.otype == dns.edns.NSID):
-                options.append(dns.edns.GenericOption(dns.edns.NSID,
+                self.edns_options.append(dns.edns.GenericOption(dns.edns.NSID,
                                                       PREFS.nsid))
+
+    def do_edns_final(self):
+        """Generate final EDNS OPT RR"""
+
         self.response.use_edns(edns=0,
-                               ednsflags=ednsflags,
+                               ednsflags=self.edns_flags,
                                payload=PREFS.edns_udp_adv,
                                request_payload=PREFS.edns_udp_max,
-                               options=options)
+                               options=self.edns_options)
 
     def prepare_response(self):
         """Prepare DNS response message"""
@@ -1170,7 +1191,7 @@ class DNSresponse:
             if self.query.message.edns > 0:
                 self.response.set_rcode(dns.rcode.BADVERS)
                 return
-            self.do_edns()
+            self.do_edns_init()
         else:
             self.response.use_edns(edns=False)
 
@@ -1183,6 +1204,9 @@ class DNSresponse:
             return
 
         self.find_answer(self.qname, self.qtype)
+
+        if self.need_edns():
+            self.do_edns_final()
 
         if self.response.rcode() in [dns.rcode.NOERROR, dns.rcode.NXDOMAIN]:
             if (not self.is_referral) or self.response.answer:
