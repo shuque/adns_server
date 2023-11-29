@@ -23,6 +23,7 @@ options are needed for online signing.
 * The dnspython module, version 2.3 or greater
 * sortedcontainers
 * PyYAML module
+* siphash module (for DNS cookie support)
 
 These can usually be installed via pip:
 ```
@@ -30,6 +31,7 @@ pip install cryptography
 pip install 'dnspython>=2.3'
 pip install sortedcontainers
 pip install pyyaml
+pip install siphash
 ```
 
 ### Usage
@@ -37,7 +39,7 @@ pip install pyyaml
 ```
 $ adns_server.py -h
 Reading config from: adnsconfig.yaml
-adns_server.py version 0.4.0
+adns_server.py version 0.4.1
 Usage: adns_server.py [<Options>]
 
 Options:

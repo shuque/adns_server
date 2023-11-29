@@ -21,7 +21,10 @@ import signal
 import hashlib
 import base64
 import time
+import random
+import binascii
 import yaml
+import siphash
 
 import dns.zone
 import dns.name
@@ -41,14 +44,18 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION = '0.4.0'
+VERSION = '0.4.1'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
 
 # Parameters for online signing with Compact Answers
 RRSIG_INCEPTION_OFFSET = 3600
 RRSIG_LIFETIME = 172800
-NXNAME_TYPE = 65283            # NXNAME Pseudo RR type
-EDNS_FLAG_CO = 0x4000          # Compact Answer OK (CO) EDNS Header Flag
+NXNAME_TYPE = 65283                   # NXNAME Pseudo RR type
+EDNS_FLAG_CO = 0x4000                 # Compact Answer OK (CO) EDNS Header Flag
+
+# Other parameters
+COOKIE_TIMESTAMP_DRIFT = 86400        # Allowed DNS Cookie timestamp drift (secs)
+COOKIE_RECALCULATE_TIME = 21600
 
 
 class Preferences:
@@ -69,6 +76,7 @@ class Preferences:
     edns_udp_adv = 1232               # Max EDNS UDP payload we advertise
     nsid = None                       # NSID option string
     minimal_any = False               # Minimal ANY (RFC 8482)
+    cookie_secret = None              # Secret for DNS cookie generation
 
     def __str__(self):
         return "<Preferences object>"
@@ -652,6 +660,7 @@ class DNSquery:
         self.malformed = False
         self.cliaddr = cliaddr
         self.cliport = cliport
+        self.headeronly = False
         self.malformed = None
 
         self.tcp = tcp
@@ -671,13 +680,11 @@ class DNSquery:
             self.malformed = True
         else:
             if not self.message.question:
-                self.malformed = True
-                self.txid = self.message.id
-                log_message(f"empty question from {self.cliaddr}")
-                return
-            self.qname = self.message.question[0].name
-            self.qtype = self.message.question[0].rdtype
-            self.qclass = self.message.question[0].rdclass
+                self.headeronly = True
+            else:
+                self.qname = self.message.question[0].name
+                self.qtype = self.message.question[0].rdtype
+                self.qclass = self.message.question[0].rdclass
             self.log_query()
 
     def edns_log_info(self):
@@ -695,12 +702,17 @@ class DNSquery:
     def log_query(self):
         """Log information about incoming DNS query"""
         transport = "TCP" if self.tcp else "UDP"
-        msg = 'query: %s %s %s %s from: %s,%d size=%d' % \
-            (transport,
-             self.qname,
-             dns.rdatatype.to_text(self.qtype),
-             dns.rdataclass.to_text(self.qclass),
-             self.cliaddr, self.cliport, self.msg_len)
+        if self.headeronly:
+            msg = 'query: %s header-only from: %s,%d size=%d' % \
+                    (transport,
+                     self.cliaddr, self.cliport, self.msg_len)
+        else:
+            msg = 'query: %s %s %s %s from: %s,%d size=%d' % \
+                    (transport,
+                     self.qname,
+                     dns.rdatatype.to_text(self.qtype),
+                     dns.rdataclass.to_text(self.qclass),
+                     self.cliaddr, self.cliport, self.msg_len)
         edns_log_message = self.edns_log_info()
         if edns_log_message:
             msg = msg + " " + edns_log_message
@@ -716,13 +728,10 @@ class DNSresponse:
         self.response = dns.message.make_response(query.message,
                                                   our_payload=PREFS.edns_udp_adv)
 
-        if self.query.malformed:
-            self.response.set_rcode(dns.rcode.FORMERR)
-            return
-
-        self.qname = query.message.question[0].name
-        self.qtype = query.message.question[0].rdtype
-        self.qclass = query.message.question[0].rdclass
+        if not self.query.headeronly:
+            self.qname = query.message.question[0].name
+            self.qtype = query.message.question[0].rdtype
+            self.qclass = query.message.question[0].rdclass
 
         self.is_referral = False
         self.cname_owner_list = []
@@ -730,6 +739,7 @@ class DNSresponse:
         self.is_nodata = False
         self.edns_flags = 0
         self.edns_options = []
+        self.badcookie = False
 
         self.response.set_rcode(dns.rcode.NOERROR)
         self.response.flags &= ~dns.flags.AA
@@ -1162,6 +1172,81 @@ class DNSresponse:
 
         return (PREFS.edns_udp_max != 0) and (self.query.message.edns != -1)
 
+    def add_cookie_option(self, data):
+        """Add EDNS Cookie option with given cookie data"""
+        option = dns.edns.GenericOption(dns.edns.COOKIE, data)
+        self.edns_options.append(option)
+
+    def verify_server_cookie(self, cookiedata):
+        """
+        Verify received cookie. Returns a tuple of (boolean, cookiedata).
+        boolean is true if the cookie validates properly, false otherwise.
+        cookiedata contains the cookie to return to the client, which is
+        either the same one, or a re-generated one if we are passed the
+        re-generation interval.
+        """
+
+        clientcookie = cookiedata[:8]
+        servercookie_received = cookiedata[8:]
+        timestamp = servercookie_received[4:8]
+        current_time = time.time()
+        cookie_time, = struct.unpack('!I', timestamp)
+        time_delta = current_time - cookie_time
+        if cookie_time > current_time or time_delta > COOKIE_TIMESTAMP_DRIFT:
+            log_message(f"Cookie timestamp too old from {self.query.cliaddr}")
+            return False, None
+        expected = self.calculate_server_cookie(clientcookie, b'\x00\x00\x00', timestamp)
+        if servercookie_received != expected:
+            log_message(f"Invalid server cookie from {self.query.cliaddr}")
+            return False, None
+        if time_delta < COOKIE_RECALCULATE_TIME:
+            return True, cookiedata
+        log_message("Re-calculating cookie for {self.query.cliaddr}")
+        newcookie = clientcookie + \
+            self.calculate_server_cookie(clientcookie,
+                                         b'\x00\x00\x00',
+                                         struct.pack('!I', int(time.time())))
+        return True, newcookie
+
+    def calculate_server_cookie(self, clientcookie, reserved, timestamp):
+        """Calculate Server Cookie"""
+
+        clientip = self.query.cliaddr
+        version = b'\x01'
+        sip = siphash.SipHash_2_4(PREFS.cookie_secret)
+        sip.update(clientcookie + version + reserved + timestamp + bytes(clientip, 'ascii'))
+        return version + reserved + timestamp + sip.digest()
+
+    def process_cookie(self, cookiedata):
+        "Process DNS cookie received in query"
+
+        cookiedatalen = len(cookiedata)
+
+        if cookiedatalen < 8:
+            self.response.set_rcode(dns.rcode.FORMERR)
+            return
+
+        clientcookie = cookiedata[0:8]
+        timestamp = struct.pack('!I', int(time.time()))
+        servercookie = self.calculate_server_cookie(clientcookie,
+                                                    b'\x00\x00\x00',
+                                                    timestamp)
+        if cookiedatalen == 8:
+            self.add_cookie_option(cookiedata + servercookie)
+            return
+        if cookiedatalen != 24:
+            log_message(f"bad cookie length={cookiedatalen} from {self.query.cliaddr}")
+            self.add_cookie_option(clientcookie + servercookie)
+            self.badcookie = True
+            return
+        verified, returncookie = self.verify_server_cookie(cookiedata)
+        if not verified:
+            log_message(f"bad cookie from {self.query.cliaddr}")
+            self.add_cookie_option(clientcookie + servercookie)
+            self.badcookie = True
+            return
+        self.add_cookie_option(returncookie)
+
     def do_edns_init(self):
         """Generate initial EDNS response information"""
 
@@ -1174,6 +1259,8 @@ class DNSresponse:
             if PREFS.nsid and (option.otype == dns.edns.NSID):
                 self.edns_options.append(dns.edns.GenericOption(dns.edns.NSID,
                                                       PREFS.nsid))
+            elif option.otype == dns.edns.COOKIE:
+                self.process_cookie(option.data)
 
     def do_edns_final(self):
         """Generate final EDNS OPT RR"""
@@ -1195,15 +1282,32 @@ class DNSresponse:
         else:
             self.response.use_edns(edns=False)
 
-        if self.qclass != dns.rdataclass.IN:
-            self.response.set_rcode(dns.rcode.REFUSED)
+        if self.response.rcode() == dns.rcode.FORMERR:
             return
 
-        if query_meta_type(self.qtype) or self.qtype == NXNAME_TYPE:
-            self.response.set_rcode(dns.rcode.REFUSED)
+        if self.badcookie:
+            self.do_edns_final()
+            self.response.set_rcode(dns.rcode.BADCOOKIE)
             return
 
-        self.find_answer(self.qname, self.qtype)
+        if self.query.headeronly:
+
+            if dns.edns.COOKIE not in [x.otype for x in self.edns_options]:
+                self.response.set_rcode(dns.rcode.FORMERR)
+                self.response.use_edns(edns=False)
+                return
+
+        else:
+
+            if self.qclass != dns.rdataclass.IN:
+                self.response.set_rcode(dns.rcode.REFUSED)
+                return
+
+            if query_meta_type(self.qtype) or self.qtype == NXNAME_TYPE:
+                self.response.set_rcode(dns.rcode.REFUSED)
+                return
+
+            self.find_answer(self.qname, self.qtype)
 
         if self.need_edns():
             self.do_edns_final()
@@ -1286,6 +1390,8 @@ def main(arguments):
     global PREFS
 
     process_args(arguments[1:])
+    PREFS.cookie_secret = binascii.hexlify(random.randbytes(8))
+
     if PREFS.daemon:
         daemon(dirname=PREFS.workdir)
     install_signal_handlers()
