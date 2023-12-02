@@ -238,10 +238,10 @@ def log_fatal(msg):
 
 
 def handle_sighup(signum, frame):
-    """handle SIGHUP - re-read zone files"""
+    """handle SIGHUP - re-read configuration and zone files"""
     _, _ = signum, frame
-    log_message('control: caught SIGHUP .. re-reading zone file.')
-    init_config(only_zones=True)
+    log_message('control: caught SIGHUP .. re-reading config and zones.')
+    init_config()
 
 
 def handle_sigterm(signum, frame):
