@@ -57,6 +57,9 @@ EDNS_FLAG_CO = 0x4000                 # Compact Answer OK (CO) EDNS Header Flag
 COOKIE_TIMESTAMP_DRIFT = 86400        # Allowed DNS Cookie timestamp drift (secs)
 COOKIE_RECALCULATE_TIME = 21600
 
+# Experimental testing of DELEG with private RRtype
+DELEG_TYPE = 65287
+
 
 class Preferences:
     """Preferences"""
@@ -1028,8 +1031,12 @@ class DNSresponse:
 
         if zobj.dnssec and self.dnssec_ok():
             ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
+            # check for deleg RRSET
+            deleg_rrset = zobj.get_rrset(sname, DELEG_TYPE)
             if ds_rrset:
                 self.add_rrset(zobj, self.response.authority, ds_rrset)
+                if deleg_rrset:
+                    self.add_rrset(zobj, self.response.authority, deleg_rrset)
             else:
                 # Insecure referral. Add NSEC record matching qname
                 if zobj.online_signing():
@@ -1123,8 +1130,9 @@ class DNSresponse:
         if sname != zobj.origin:
             rdataset = zobj.get_rdataset(sname, dns.rdatatype.NS)
             if rdataset:
-                self.do_referral(zobj, sname, rdataset)
-                return True
+                if (qname != sname) or (stype not in [dns.rdatatype.DS, DELEG_TYPE]):
+                    self.do_referral(zobj, sname, rdataset)
+                    return True
 
         if sname == qname:
             self.find_rrtype(zobj, sname, stype)
