@@ -21,6 +21,7 @@ import signal
 import hashlib
 import base64
 import time
+import enum
 import random
 import binascii
 import yaml
@@ -59,6 +60,11 @@ COOKIE_RECALCULATE_TIME = 21600
 
 # Experimental testing of DELEG with private RRtype
 DELEG_TYPE = 65287
+
+# Boolean enums
+class Finished(enum.Flag):
+    TRUE = True
+    FALSE = False
 
 
 class Preferences:
@@ -784,25 +790,19 @@ class DNSresponse:
 
         if rrset in section:
             return
-
         section.append(rrset)
 
-        if not authoritative:
-            return
-
-        if not self.dnssec_ok():
+        if not authoritative or not self.dnssec_ok():
             return
 
         if zobj.online_signing():
-            rrsig = sign_rrset(zobj, rrset)
-            section.append(rrsig)
+            section.append(sign_rrset(zobj, rrset))
             return
 
         if zobj.dnssec:
             rrname = wildcard if wildcard else rrset.name
             rdataset = zobj.get_rdataset(rrname,
-                                         dns.rdatatype.RRSIG,
-                                         covers=rrset.rdtype)
+                                         dns.rdatatype.RRSIG, covers=rrset.rdtype)
             if rdataset:
                 rrsig = dns.rrset.RRset(rrset.name,
                                         dns.rdataclass.IN, rdataset.rdtype)
@@ -1107,7 +1107,14 @@ class DNSresponse:
         return
 
     def process_name(self, zobj, qname, sname, stype):
-        """Process name and type"""
+        """
+        Process name and type. This function is called iteratively by
+        find_answer_in_zone() to find the answer to the qname. At the given
+        search name (sname), if the name doesn't exist, we look for a wildcard;
+        otherwise we look for a DNAME or delegation. Otherwise, we indicate
+        that the search hasn't finished, and the caller will append the next
+        label towards the qname and call us again.
+        """
 
         node = zobj.get_node(sname)
         if node is None:
@@ -1116,15 +1123,15 @@ class DNSresponse:
             if zobj.get_node(wildcard_name) is not None:
                 self.find_rrtype(zobj, wildcard_name, stype, wildcard=sname)
                 self.wildcard_no_closer_match(zobj, wildcard_name, sname)
-                return True
+                return Finished.TRUE
             self.nxdomain(zobj, sname)
-            return True
+            return Finished.TRUE
 
         # Look for DNAME
         dname_rdataset = zobj.get_rdataset(sname, dns.rdatatype.DNAME)
         if dname_rdataset:
             self.process_dname(zobj, qname, sname, stype, dname_rdataset)
-            return True
+            return Finished.TRUE
 
         # Look for delegation
         if sname != zobj.origin:
@@ -1132,16 +1139,21 @@ class DNSresponse:
             if rdataset:
                 if (qname != sname) or (stype not in [dns.rdatatype.DS, DELEG_TYPE]):
                     self.do_referral(zobj, sname, rdataset)
-                    return True
+                    return Finished.TRUE
 
         if sname == qname:
             self.find_rrtype(zobj, sname, stype)
-            return True
+            return Finished.TRUE
 
-        return False
+        return Finished.FALSE
 
     def find_answer_in_zone(self, zobj, qname, qtype):
-        """Find answer for name and type in given zone"""
+        """
+        Find answer for name and type in given zone. Calls process_name()
+        iteratively to search zone from zone apex name to qname, appending
+        successive labels til we reach the qname, or we are diverted by a
+        wildcard, dname, or delegation.
+        """
 
         zone_name = zobj.origin
         label_list = list(qname.relativize(zone_name).labels)
