@@ -61,8 +61,9 @@ COOKIE_RECALCULATE_TIME = 21600
 # Experimental testing of DELEG with private RRtype
 DELEG_TYPE = 65287
 
-# Boolean enums
+
 class Finished(enum.Flag):
+    """Finished Boolean enum"""
     TRUE = True
     FALSE = False
 
@@ -1029,26 +1030,33 @@ class DNSresponse:
                     rrset.update(rdataset)
                     self.add_rrset(zobj, self.response.additional, rrset, authoritative=False)
 
-        if zobj.dnssec and self.dnssec_ok():
-            ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
-            # check for deleg RRSET
-            deleg_rrset = zobj.get_rrset(sname, DELEG_TYPE)
-            if ds_rrset:
-                self.add_rrset(zobj, self.response.authority, ds_rrset)
-                if deleg_rrset:
-                    self.add_rrset(zobj, self.response.authority, deleg_rrset)
-            else:
-                # Insecure referral. Add NSEC record matching qname
-                if zobj.online_signing():
-                    self.insecure_referral_online(zobj, sname)
-                elif zobj.nsec3param is None:
-                    n1_rrset = zobj.nsec_matching(sname)
-                    if n1_rrset:
-                        self.add_rrset(zobj, self.response.authority, n1_rrset)
-                else:
-                    n3_rrset = zobj.nsec3_matching(sname)
-                    if n3_rrset:
-                        self.add_rrset(zobj, self.response.authority, n3_rrset)
+        # Lookup experimental DELEG RRset
+        deleg_rrset = zobj.get_rrset(sname, DELEG_TYPE)
+
+        if not (zobj.dnssec and self.dnssec_ok()):
+            if deleg_rrset:
+                self.add_rrset(zobj, self.response.authority, deleg_rrset)
+            return
+
+        ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
+        if ds_rrset:
+            # Secure referral; add DS record, and if present DELEG
+            self.add_rrset(zobj, self.response.authority, ds_rrset)
+            if deleg_rrset:
+                self.add_rrset(zobj, self.response.authority, deleg_rrset)
+            return
+
+        # Insecure referral. Add NSEC record matching qname
+        if zobj.online_signing():
+            self.insecure_referral_online(zobj, sname)
+        elif zobj.nsec3param is None:
+            n1_rrset = zobj.nsec_matching(sname)
+            if n1_rrset:
+                self.add_rrset(zobj, self.response.authority, n1_rrset)
+        else:
+            n3_rrset = zobj.nsec3_matching(sname)
+            if n3_rrset:
+                self.add_rrset(zobj, self.response.authority, n3_rrset)
 
     def insecure_referral_online(self, zobj, sname):
         """Generate online NSEC RRset for insecure referral"""
