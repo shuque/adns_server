@@ -485,9 +485,13 @@ class Zone(dns.zone.Zone):
     def nsec_covering(self, name):
         """Return NSEC RRset covering the name"""
 
-        position = self.nodes.bisect_left(name)
-        nsec_name = self.nodes.peekitem(position-1)[0]
-        return self.get_rrset(nsec_name, dns.rdatatype.NSEC)
+        position = self.nodes.bisect_left(name) - 1
+        while True:
+            nsec_name = self.nodes.peekitem(position)[0]
+            nsec_rrset = self.get_rrset(nsec_name, dns.rdatatype.NSEC)
+            if nsec_rrset:
+                return nsec_rrset
+            position -= 1
 
     def nsec3_hash(self, name):
         """Return NSEC3 hash of name"""
