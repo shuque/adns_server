@@ -1002,6 +1002,12 @@ class DNSresponse:
                                    wildcard=wildcard)
                 return
 
+        # Special case processing of queries for owners of NSEC3 records
+        if zobj.nsec3param is not None:
+            if zobj.get_rdataset(sname, dns.rdatatype.NSEC3):
+                self.nxdomain(zobj, sname)
+                return
+
         # Look for requested RRtype
         rdataset = zobj.get_rdataset(sname, stype)
         if rdataset:
