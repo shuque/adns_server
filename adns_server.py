@@ -45,7 +45,7 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION = '0.4.1'
+VERSION = '0.4.2'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
 
 # Parameters for online signing with Compact Answers
@@ -1140,7 +1140,8 @@ class DNSresponse:
             wildcard_name = dns.name.Name((b'*',) + sname.labels[1:])
             if zobj.get_node(wildcard_name) is not None:
                 self.find_rrtype(zobj, wildcard_name, stype, wildcard=sname)
-                self.wildcard_no_closer_match(zobj, wildcard_name, sname)
+                if not zobj.online_signing():
+                    self.wildcard_no_closer_match(zobj, wildcard_name, sname)
                 return Finished.TRUE
             self.nxdomain(zobj, sname)
             return Finished.TRUE
