@@ -37,7 +37,8 @@ import dns.rdataclass
 import dns.query
 import dns.edns
 import dns.dnssec
-from dns.rdtypes.ANY.NSEC import NSEC, Bitmap
+from dns.rdtypes.ANY import NSEC
+from dns.rdtypes.ANY import NSEC3
 
 from sortedcontainers import SortedDict
 
@@ -591,6 +592,7 @@ class ZoneDict:
 
 B32_TO_EXT_HEX = bytes.maketrans(b'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567',
                                  b'0123456789ABCDEFGHIJKLMNOPQRSTUV')
+NSEC3HASH_SIZE_IN_OCTETS = 20
 
 def hashalg(algnum):
     """Return hash function corresponding to hash algorithm number"""
@@ -651,10 +653,10 @@ def sign_rrset(zone, rrset):
 def make_nsec_rrset(owner, nextname, rrtypes, ttl):
     """Create NSEC RRset from components"""
 
-    rdata = NSEC(rdclass=dns.rdataclass.IN,
-                 rdtype=dns.rdatatype.NSEC,
-                 next=nextname,
-                 windows=Bitmap.from_rdtypes(rrtypes))
+    rdata = NSEC.NSEC(rdclass=dns.rdataclass.IN,
+                      rdtype=dns.rdatatype.NSEC,
+                      next=nextname,
+                      windows=NSEC.Bitmap.from_rdtypes(rrtypes))
     rrset = dns.rrset.RRset(owner,
                             dns.rdataclass.IN,
                             dns.rdatatype.NSEC)
@@ -664,6 +666,54 @@ def make_nsec_rrset(owner, nextname, rrtypes, ttl):
     rdataset.add(rdata)
     rrset.update(rdataset)
     return rrset
+
+
+def make_nsec3_rrset(params, owner, nextname, rrtypes, ttl):
+    """Create NSEC3 RRset from components"""
+
+    rdata = NSEC3.NSEC3(rdclass=dns.rdataclass.IN,
+                        rdtype=dns.rdatatype.NSEC3,
+                        algorithm=params.algorithm,
+                        flags=params.flags,
+                        iterations=params.iterations,
+                        salt=params.salt,
+                        next=nextname,
+                        windows=NSEC3.Bitmap.from_rdtypes(rrtypes))
+    rrset = dns.rrset.RRset(owner,
+                            dns.rdataclass.IN,
+                            dns.rdatatype.NSEC3)
+    rdataset = dns.rdataset.Rdataset(dns.rdataclass.IN,
+                                     dns.rdatatype.NSEC3,
+                                     ttl=ttl)
+    rdataset.add(rdata)
+    rrset.update(rdataset)
+    return rrset
+
+
+def make_nsec3_rrset_minimal(params, zone, owner, rrtypes, ttl, covering=False):
+    """
+    Create minimal NSEC3 RRset. If "covering" is True, then the NSEC3
+    record will cover the given owner name, otherwise it will match it.
+    """
+
+    owner_hash = nsec3hash(owner,
+                           params.algorithm, params.salt, params.iterations,
+                           binary_out=True)
+    hash_owner_int = int.from_bytes(owner_hash, byteorder='big')
+
+    owner_int = (hash_owner_int - 1) if covering else hash_owner_int
+    owner_bytes = owner_int.to_bytes(NSEC3HASH_SIZE_IN_OCTETS, 'big')
+    owner_hash = base64.b32encode(owner_bytes).translate(NSEC3.b32_normal_to_hex)
+    new_owner = dns.name.Name((owner_hash,) + zone.labels)
+
+    next_int = hash_owner_int + 1
+    next_bytes = next_int.to_bytes(NSEC3HASH_SIZE_IN_OCTETS, 'big')
+
+    return make_nsec3_rrset(params,
+                            new_owner,
+                            next_bytes,
+                            rrtypes,
+                            ttl)
 
 
 class DNSquery:
@@ -832,7 +882,10 @@ class DNSresponse:
             return
 
         if zobj.online_signing():
-            self.nxdomain_online(zobj, sname)
+            if zobj.nsec3param:
+                self.nxdomain_online_nsec3(zobj, sname)
+            else:
+                self.nxdomain_online_compact(zobj, sname)
             return
 
         if zobj.dnssec:
@@ -841,16 +894,47 @@ class DNSresponse:
             else:
                 self.nxdomain_nsec3(zobj, sname)
 
-    def nxdomain_online(self, zobj, sname):
+    def nxdomain_online_compact(self, zobj, sname):
         """
         Generate online NSEC NXDOMAIN response using Compact Denial
         """
+
         if compact_answer_ok(self.query.message):
             self.response.set_rcode(dns.rcode.NXDOMAIN)
         rrtypes = [dns.rdatatype.RRSIG, dns.rdatatype.NSEC, NXNAME_TYPE]
         nextname = dns.name.Name((b'\x00',) + sname.labels)
         nsec_rrset = make_nsec_rrset(sname, nextname, rrtypes, zobj.soa_min_ttl)
         self.add_rrset(zobj, self.response.authority, nsec_rrset)
+
+    def nxdomain_online_nsec3(self, zobj, sname):
+        """
+        Generate online NSEC3 NXDOMAIN response using White Lies
+        """
+
+        self.response.set_rcode(dns.rcode.NXDOMAIN)
+
+        closest_encloser = sname.parent()
+        node = zobj.find_node(closest_encloser)
+        closest_encloser_rrtypes = [x.rdtype for x in node.rdatasets] + [dns.rdatatype.RRSIG]
+        n3_closest_encloser = make_nsec3_rrset_minimal(
+            zobj.nsec3param[0], zobj.origin,
+            closest_encloser, closest_encloser_rrtypes,
+            zobj.soa_min_ttl, covering=False)
+        self.add_rrset(zobj, self.response.authority, n3_closest_encloser)
+
+        next_closer = sname
+        n3_next_closer = make_nsec3_rrset_minimal(
+            zobj.nsec3param[0], zobj.origin,
+            next_closer, [],
+            zobj.soa_min_ttl, covering=True)
+        self.add_rrset(zobj, self.response.authority, n3_next_closer)
+
+        wildcard = dns.name.Name((b'*',) + sname.parent().labels)
+        n3_wildcard = make_nsec3_rrset_minimal(
+            zobj.nsec3param[0], zobj.origin,
+            wildcard, [],
+            zobj.soa_min_ttl, covering=True)
+        self.add_rrset(zobj, self.response.authority, n3_wildcard)
 
     def nxdomain_nsec(self, zobj, sname):
         """Generate NSEC NXDOMAIN response"""
@@ -886,7 +970,10 @@ class DNSresponse:
             return
 
         if zobj.online_signing():
-            self.nodata_online(zobj, sname, wildcard)
+            if zobj.nsec3param:
+                self.nodata_online_nsec3(zobj, sname, wildcard)
+            else:
+                self.nodata_online_compact(zobj, sname, wildcard)
             return
 
         if zobj.dnssec:
@@ -895,10 +982,11 @@ class DNSresponse:
             else:
                 self.nodata_nsec3(zobj, sname, wildcard=wildcard)
 
-    def nodata_online(self, zobj, sname, wildcard=None):
+    def nodata_online_compact(self, zobj, sname, wildcard=None):
         """
         Generate online NSEC NODATA response
         """
+
         if wildcard:
             nextname = dns.name.Name((b'\x00',) + self.qname.labels)
             owner = self.qname
@@ -910,6 +998,21 @@ class DNSresponse:
             [dns.rdatatype.RRSIG, dns.rdatatype.NSEC]
         nsec_rrset = make_nsec_rrset(owner, nextname, rrtypes, zobj.soa_min_ttl)
         self.add_rrset(zobj, self.response.authority, nsec_rrset)
+
+    def nodata_online_nsec3(self, zobj, sname, wildcard=None):
+        """
+        Generate online NSEC3 NODATA response using White Lies
+        """
+
+        owner = self.qname if wildcard else sname
+        node = zobj.find_node(sname)
+        rrtypes = [x.rdtype for x in node.rdatasets] + [dns.rdatatype.RRSIG]
+
+        n3_nodata = make_nsec3_rrset_minimal(
+            zobj.nsec3param[0], zobj.origin,
+            owner, rrtypes,
+            zobj.soa_min_ttl, covering=False)
+        self.add_rrset(zobj, self.response.authority, n3_nodata)
 
     def nodata_nsec(self, zobj, sname, wildcard=None):
         """Generate NSEC NODATA response"""
@@ -944,6 +1047,7 @@ class DNSresponse:
 
     def wildcard_no_closer_match(self, zobj, wildcard, stype):
         """Wildcard no closer match proof"""
+
         _ = wildcard
         if zobj.dnssec and self.dnssec_ok():
             if zobj.nsec3param is None:
@@ -1069,14 +1173,23 @@ class DNSresponse:
                 self.add_rrset(zobj, self.response.authority, n3_rrset)
 
     def insecure_referral_online(self, zobj, sname):
-        """Generate online NSEC RRset for insecure referral"""
+        """Generate online NSEC or NSEC3 RRset for insecure referral"""
 
-        nextname = dns.name.Name((b'\x00',) + sname.labels)
         node = zobj.find_node(sname)
-        rrtypes = [x.rdtype for x in node.rdatasets] + \
-            [dns.rdatatype.RRSIG, dns.rdatatype.NSEC]
-        nsec_rrset = make_nsec_rrset(sname, nextname, rrtypes, zobj.soa_min_ttl)
-        self.add_rrset(zobj, self.response.authority, nsec_rrset)
+
+        if not zobj.nsec3param:
+            nextname = dns.name.Name((b'\x00',) + sname.labels)
+            rrtypes = [x.rdtype for x in node.rdatasets] + \
+                [dns.rdatatype.RRSIG, dns.rdatatype.NSEC]
+            nsec_rrset = make_nsec_rrset(sname, nextname, rrtypes, zobj.soa_min_ttl)
+            self.add_rrset(zobj, self.response.authority, nsec_rrset)
+        else:
+            rrtypes = [x.rdtype for x in node.rdatasets] + [dns.rdatatype.RRSIG]
+            nsec3_rrset = make_nsec3_rrset_minimal(
+                zobj.nsec3param[0], zobj.origin,
+                sname, rrtypes,
+                zobj.soa_min_ttl, covering=False)
+            self.add_rrset(zobj, self.response.authority, nsec3_rrset)
 
     def process_cname(self, zobj, rrname, sname, stype, cname_rdataset,
                       wildcard=None):

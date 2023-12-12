@@ -9,11 +9,16 @@ It serves DNS zones in master file format (e.g. BIND format). For DNSSEC,
 it can serve pre-signed master file format zones, both NSEC and NSEC3 (e.g.
 zones generated with an offline signer like BIND's dnssec-signzone). It
 can also perform online signing with a combined signing key using the
-[Compact Denial of Existence](https://datatracker.ietf.org/doc/draft-ietf-dnsop-compact-denial-of-existence/) method.
+[Compact Denial of Existence](https://datatracker.ietf.org/doc/draft-ietf-dnsop-compact-denial-of-existence/) method, or if the zone apex has an NSEC3PARAM record, then with traditional
+NSEC3 White Lies.
 
 The 'dnssec: true' parameter must be specified in the configuration file
 for signed zones. The 'dynamic_signing: true' and 'private_key: /path/to/privatekey.pem'
 options are needed for online signing.
+
+The server can also support delivery of the experimental DELEG record,
+using a private RR type in referral responses. DELEG is a newly proposed
+mechanism to support extensible delegation capabilities in the DNS.
 
 
 ### Pre-requisites
