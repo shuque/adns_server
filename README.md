@@ -5,20 +5,21 @@ I mainly use it for functional testing and prototyping new protocol
 features. It is not intended for production use or high performance
 applications.
 
-It serves DNS zones in master file format (e.g. BIND format). For DNSSEC,
-it can serve pre-signed master file format zones, both NSEC and NSEC3 (e.g.
-zones generated with an offline signer like BIND's dnssec-signzone). It
-can also perform online signing with a combined signing key using the
-[Compact Denial of Existence](https://datatracker.ietf.org/doc/draft-ietf-dnsop-compact-denial-of-existence/) method, or if the zone apex has an NSEC3PARAM record, then with traditional
-NSEC3 White Lies.
+It serves DNS zones in master file format. For DNSSEC, it can serve
+pre-signed master file format zones, both NSEC and NSEC3 (e.g. zones
+generated with an offline signer like BIND's dnssec-signzone). It can
+also perform online signing with a combined signing key, using the
+[Compact Denial of Existence](https://datatracker.ietf.org/doc/draft-ietf-dnsop-compact-denial-of-existence/) method, or for NSEC3 zones, with the
+NSEC3 White Lies method.
 
 The 'dnssec: true' parameter must be specified in the configuration file
 for signed zones. The 'dynamic_signing: true' and 'private_key: /path/to/privatekey.pem'
 options are needed for online signing.
 
-The server can also support delivery of the experimental DELEG record,
-using a private RR type in referral responses. DELEG is a newly proposed
-mechanism to support extensible delegation capabilities in the DNS.
+The server can also support delivery of the experimental DELEG record
+in referral responses, using a private RR type (65287). DELEG is a newly
+proposed mechanism to support extensible delegation capabilities in the
+DNS.
 
 
 ### Pre-requisites
@@ -44,7 +45,7 @@ pip install siphash
 ```
 $ adns_server.py -h
 Reading config from: adnsconfig.yaml
-adns_server.py version 0.4.2
+adns_server.py version 0.4.3
 Usage: adns_server.py [<Options>]
 
 Options:

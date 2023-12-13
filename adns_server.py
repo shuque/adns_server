@@ -46,7 +46,7 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION = '0.4.2'
+VERSION = '0.4.3'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
 
 # Parameters for online signing with Compact Answers
