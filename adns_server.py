@@ -158,9 +158,6 @@ def init_config(only_zones=False):
             dnssec = entry.get('dnssec', False)
             dynamic_signing = entry.get('dynamic_signing', False)
             deleg_enabled = entry.get('deleg_enabled', False)
-            if deleg_enabled and not dynamic_signing:
-                print(f"error: zone {zonename}: deleg requires online signing")
-                sys.exit(1)
             if dnssec and dynamic_signing:
                 privatekey = load_private_key(entry['private_key'])
             else:
@@ -1160,7 +1157,7 @@ class DNSresponse:
         if zobj.deleg_enabled:
             deleg_rrset = zobj.get_rrset(sname, DELEG_TYPE)
 
-        # I don't think this is needed. Only signed zones should return DELEG (fix?)
+        # For unsigned zones or DO=0 queries, return DELEG (if enabled) and return
         if not (zobj.dnssec and self.dnssec_ok()):
             if zobj.deleg_enabled and deleg_rrset:
                 self.add_rrset(zobj, self.response.authority, deleg_rrset)
