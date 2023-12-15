@@ -157,12 +157,17 @@ def init_config(only_zones=False):
             zonefile = entry['file']
             dnssec = entry.get('dnssec', False)
             dynamic_signing = entry.get('dynamic_signing', False)
+            deleg_enabled = entry.get('deleg_enabled', False)
+            if deleg_enabled and not dynamic_signing:
+                print(f"error: zone {zonename}: deleg requires online signing")
+                sys.exit(1)
             if dnssec and dynamic_signing:
                 privatekey = load_private_key(entry['private_key'])
             else:
                 privatekey = None
             try:
-                ZONEDICT.add(zonename, zonefile, dnssec=dnssec, key=privatekey)
+                ZONEDICT.add(zonename, zonefile,
+                             dnssec=dnssec, key=privatekey, deleg_enabled=deleg_enabled)
             except dns.exception.DNSException as exc_info:
                 print("error: load zone {} failed: {}".format(
                     zonename, exc_info))
@@ -410,7 +415,8 @@ class Zone(dns.zone.Zone):
         'privatekey',
         'signing_dnskey',
         'keytag',
-        'nsec3param'
+        'nsec3param',
+        'deleg_enabled'
     ]
 
     def __init__(self, origin, rdclass=dns.rdataclass.IN, relativize=False):
@@ -422,6 +428,7 @@ class Zone(dns.zone.Zone):
         self.dnssec = False
         self.privatekey = None
         self.signing_dnskey = None
+        self.deleg_enabled = False
         self.keytag = None
         self.nsec3param = None
         self.soa_min_ttl = None
@@ -441,6 +448,10 @@ class Zone(dns.zone.Zone):
         self.signing_dnskey = self.get_rdataset(self.origin,
                                                 dns.rdatatype.DNSKEY)[0]
         self.keytag = dns.dnssec.key_id(self.signing_dnskey)
+
+    def set_deleg(self, deleg_enabled):
+        """Set deleg_enabled flag"""
+        self.deleg_enabled = deleg_enabled
 
     def set_soa_min_ttl(self):
         """Calculate SOA min TTL value"""
@@ -542,7 +553,7 @@ class Zone(dns.zone.Zone):
         return "<Zone: {}>".format(self.origin)
 
 
-def zone_from_file(name, zonefile, dnssec=False, key=None):
+def zone_from_file(name, zonefile, dnssec=False, key=None, deleg_enabled=False):
     """Obtain Zone object from zone name and file"""
 
     zone = dns.zone.from_file(zonefile, origin=name, zone_factory=Zone,
@@ -559,6 +570,7 @@ def zone_from_file(name, zonefile, dnssec=False, key=None):
         zone.init_dnssec()
         if key is not None:
             zone.init_key(key)
+    zone.set_deleg(deleg_enabled)
     return zone
 
 
@@ -577,10 +589,10 @@ class ZoneDict:
         """Return zone list"""
         return self.zonelist
 
-    def add(self, zonename, zonefile, dnssec=False, key=None):
+    def add(self, zonename, zonefile, dnssec=False, key=None, deleg_enabled=False):
         """Create and add zonename->zone object"""
         zonename = dns.name.from_text(zonename)
-        self.data[zonename] = zone_from_file(zonename, zonefile, dnssec, key)
+        self.data[zonename] = zone_from_file(zonename, zonefile, dnssec, key, deleg_enabled)
 
     def find(self, qname):
         """Return closest enclosing zone object for the qname"""
@@ -1145,10 +1157,12 @@ class DNSresponse:
                     self.add_rrset(zobj, self.response.additional, rrset, authoritative=False)
 
         # Lookup experimental DELEG RRset
-        deleg_rrset = zobj.get_rrset(sname, DELEG_TYPE)
+        if zobj.deleg_enabled:
+            deleg_rrset = zobj.get_rrset(sname, DELEG_TYPE)
 
+        # I don't think this is needed. Only signed zones should return DELEG (fix?)
         if not (zobj.dnssec and self.dnssec_ok()):
-            if deleg_rrset:
+            if zobj.deleg_enabled and deleg_rrset:
                 self.add_rrset(zobj, self.response.authority, deleg_rrset)
             return
 
@@ -1156,13 +1170,20 @@ class DNSresponse:
         if ds_rrset:
             # Secure referral; add DS record, and if present DELEG
             self.add_rrset(zobj, self.response.authority, ds_rrset)
-            if deleg_rrset:
-                self.add_rrset(zobj, self.response.authority, deleg_rrset)
+            if zobj.deleg_enabled:
+                if deleg_rrset:
+                    self.add_rrset(zobj, self.response.authority, deleg_rrset)
+                else:
+                    # Add NSEC to prove DELEG doesn't exist
+                    self.add_nsec_online(zobj, sname)
             return
+
+        if zobj.deleg_enabled and deleg_rrset:
+            self.add_rrset(zobj, self.response.authority, deleg_rrset)
 
         # Insecure referral. Add NSEC record matching qname
         if zobj.online_signing():
-            self.insecure_referral_online(zobj, sname)
+            self.add_nsec_online(zobj, sname)
         elif zobj.nsec3param is None:
             n1_rrset = zobj.nsec_matching(sname)
             if n1_rrset:
@@ -1172,7 +1193,7 @@ class DNSresponse:
             if n3_rrset:
                 self.add_rrset(zobj, self.response.authority, n3_rrset)
 
-    def insecure_referral_online(self, zobj, sname):
+    def add_nsec_online(self, zobj, sname):
         """Generate online NSEC or NSEC3 RRset for insecure referral"""
 
         node = zobj.find_node(sname)

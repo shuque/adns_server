@@ -19,7 +19,8 @@ options are needed for online signing.
 The server can also support delivery of the experimental DELEG record
 in referral responses, using a private RR type (65287). DELEG is a newly
 proposed mechanism to support extensible delegation capabilities in the
-DNS.
+DNS. A per zone configuration flag "deleg_enabled" needs to be set to
+true to use this feature.
 
 
 ### Pre-requisites
