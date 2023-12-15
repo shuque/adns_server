@@ -894,7 +894,7 @@ class DNSresponse:
             if zobj.nsec3param:
                 self.nxdomain_online_nsec3(zobj, sname)
             else:
-                self.nxdomain_online_compact(zobj, sname)
+                self.nxdomain_online_compact(zobj)
             return
 
         if zobj.dnssec:
@@ -903,16 +903,17 @@ class DNSresponse:
             else:
                 self.nxdomain_nsec3(zobj, sname)
 
-    def nxdomain_online_compact(self, zobj, sname):
+    def nxdomain_online_compact(self, zobj):
         """
         Generate online NSEC NXDOMAIN response using Compact Denial
         """
 
         if compact_answer_ok(self.query.message):
             self.response.set_rcode(dns.rcode.NXDOMAIN)
+
         rrtypes = [dns.rdatatype.RRSIG, dns.rdatatype.NSEC, NXNAME_TYPE]
-        nextname = dns.name.Name((b'\x00',) + sname.labels)
-        nsec_rrset = make_nsec_rrset(sname, nextname, rrtypes, zobj.soa_min_ttl)
+        nextname = dns.name.Name((b'\x00',) + self.qname.labels)
+        nsec_rrset = make_nsec_rrset(self.qname, nextname, rrtypes, zobj.soa_min_ttl)
         self.add_rrset(zobj, self.response.authority, nsec_rrset)
 
     def nxdomain_online_nsec3(self, zobj, sname):
