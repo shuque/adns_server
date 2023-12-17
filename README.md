@@ -1,26 +1,43 @@
 # adns_server
 
 This is a fully functional authoritative DNS server written in Python.
-I mainly use it for functional testing and prototyping new protocol
-features. It is not intended for production use or high performance
-applications.
+It serves DNS zones in master file format. I mainly use it for functional
+testing and prototyping new protocol features. It is not intended for
+production use or high performance applications.
 
-It serves DNS zones in master file format. For DNSSEC, it can serve
+## DNSSEC Support
+
+The server implements the DNSSEC protocol extensions. It can serve
 pre-signed master file format zones, both NSEC and NSEC3 (e.g. zones
 generated with an offline signer like BIND's dnssec-signzone). It can
 also perform online signing with a combined signing key, using the
-[Compact Denial of Existence](https://datatracker.ietf.org/doc/draft-ietf-dnsop-compact-denial-of-existence/) method, or for NSEC3 zones, with the
-NSEC3 White Lies method.
+[Compact Denial of Existence](https://datatracker.ietf.org/doc/draft-ietf-dnsop-compact-denial-of-existence/) method, or for NSEC3 zones, with the NSEC3 White Lies method.
 
 The 'dnssec: true' parameter must be specified in the configuration file
 for signed zones. The 'dynamic_signing: true' and 'private_key: /path/to/privatekey.pem'
 options are needed for online signing.
 
-The server can also support delivery of the experimental DELEG record
-in referral responses, using a private RR type (65287). DELEG is a newly
-proposed mechanism to support extensible delegation capabilities in the
-DNS. A per zone configuration flag "deleg_enabled" needs to be set to
-true to use this feature.
+## DELEG Support
+
+The server can also support delivery of the
+[experimental DELEG record](https://github.com/fl1ger/deleg) in referral
+responses, using the private RR type, 65287. DELEG is a newly proposed
+mechanism to support extensible delegation capabilities in the DNS, and
+is planned to (eventually) replace both the DS and parent-side NS records.
+A per zone configuration flag "deleg_enabled" needs to be set to true to use
+this feature. While the protocol details are still being developed, here is
+a quick summary of the behavior as currently implemented in this program:
+the DELEG record is a delegation record that appears in the parent zone, whose
+owner name matches the name of the delegated zone, similar to DS, and like the
+DS record, it is authoritative in the parent. When a delegation contains both
+a DS and DELEG record set, then both are returned in the referral response.
+When only one of them is present, it is returned along with the NSEC or NSEC3
+record set matching the delegated name (to prove that the other doesn't exist).
+Confirming the existence of DELEG capabilities will likely also need a secure
+signal via a new DS digest type, or a new DNSKEY flag. Those signals can just
+be loaded from zone file data. DELEG can also be returned from an unsigned
+parent zone, although careful restrictions will need to be placed on when and
+how it should be trusted.
 
 
 ### Pre-requisites
@@ -46,7 +63,7 @@ pip install siphash
 ```
 $ adns_server.py -h
 Reading config from: adnsconfig.yaml
-adns_server.py version 0.4.3
+adns_server.py version 0.4.4
 Usage: adns_server.py [<Options>]
 
 Options:
