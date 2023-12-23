@@ -1117,7 +1117,7 @@ class DNSresponse:
                 return
 
         # Special case processing of queries for owners of NSEC3 records
-        if zobj.nsec3param is not None:
+        if (zobj.nsec3param is not None) and (not zobj.online_signing()):
             if zobj.get_rdataset(sname, dns.rdatatype.NSEC3):
                 self.nxdomain(zobj, sname)
                 return
