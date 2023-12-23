@@ -1143,16 +1143,8 @@ class DNSresponse:
         ns_rrset = dns.rrset.RRset(sname, dns.rdataclass.IN, dns.rdatatype.NS)
         ns_rrset.update(rdataset)
         self.add_rrset(zobj, self.response.authority, ns_rrset, authoritative=False)
-        for rdata in rdataset:
-            if not rdata.target.is_subdomain(sname):
-                continue
-            for rrtype in (dns.rdatatype.A, dns.rdatatype.AAAA):
-                rdataset = zobj.get_rdataset(rdata.target, rrtype)
-                if rdataset:
-                    rrset = dns.rrset.RRset(rdata.target,
-                                            dns.rdataclass.IN, rrtype)
-                    rrset.update(rdataset)
-                    self.add_rrset(zobj, self.response.additional, rrset, authoritative=False)
+
+        self.get_glue(zobj, sname, rdataset)
 
         # Lookup experimental DELEG RRset
         if zobj.deleg_enabled:
@@ -1166,20 +1158,19 @@ class DNSresponse:
 
         ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
         if ds_rrset:
-            # Secure referral; add DS record, and if present DELEG
             self.add_rrset(zobj, self.response.authority, ds_rrset)
-            if zobj.deleg_enabled:
-                if deleg_rrset:
-                    self.add_rrset(zobj, self.response.authority, deleg_rrset)
-                else:
-                    # Add NSEC to prove DELEG doesn't exist
-                    self.add_nsec_online(zobj, sname)
-            return
 
         if zobj.deleg_enabled and deleg_rrset:
             self.add_rrset(zobj, self.response.authority, deleg_rrset)
 
-        # Insecure referral. Add NSEC record matching qname
+        if zobj.deleg_enabled:
+            if ds_rrset and deleg_rrset:
+                return
+        else:
+            if ds_rrset:
+                return
+
+        # Insecure referral or only one of {DS,DELEG}. Add NSEC record matching sname
         if zobj.online_signing():
             self.add_nsec_online(zobj, sname)
         elif zobj.nsec3param is None:
@@ -1191,8 +1182,22 @@ class DNSresponse:
             if n3_rrset:
                 self.add_rrset(zobj, self.response.authority, n3_rrset)
 
+    def get_glue(self, zobj, sname, rdataset):
+        """Add glue records if needed"""
+
+        for rdata in rdataset:
+            if not rdata.target.is_subdomain(sname):
+                continue
+            for rrtype in (dns.rdatatype.A, dns.rdatatype.AAAA):
+                rdataset = zobj.get_rdataset(rdata.target, rrtype)
+                if rdataset:
+                    rrset = dns.rrset.RRset(rdata.target,
+                                            dns.rdataclass.IN, rrtype)
+                    rrset.update(rdataset)
+                    self.add_rrset(zobj, self.response.additional, rrset, authoritative=False)
+
     def add_nsec_online(self, zobj, sname):
-        """Generate online NSEC or NSEC3 RRset for insecure referral"""
+        """Generate online NSEC or NSEC3 RRset for given name"""
 
         node = zobj.find_node(sname)
 
