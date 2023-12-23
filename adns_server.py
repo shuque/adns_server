@@ -46,7 +46,7 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION = '0.4.4'
+VERSION = '0.4.5'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
 
 # Parameters for online signing with Compact Answers
@@ -1196,6 +1196,28 @@ class DNSresponse:
                     rrset.update(rdataset)
                     self.add_rrset(zobj, self.response.additional, rrset, authoritative=False)
 
+    def do_referral_deleg_only(self, zobj, sname, deleg_rrset):
+        """Do DELEG-only referral - future looking"""
+
+        self.is_referral = True
+        self.add_rrset(zobj, self.response.authority, deleg_rrset)
+
+        # if DS exists, return it too (may have DS shim signal)
+        ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
+        if ds_rrset:
+            self.add_rrset(zobj, self.response.authority, ds_rrset)
+
+        if zobj.online_signing():
+            self.add_nsec_online(zobj, sname)
+        elif zobj.nsec3param is None:
+            n1_rrset = zobj.nsec_matching(sname)
+            if n1_rrset:
+                self.add_rrset(zobj, self.response.authority, n1_rrset)
+        else:
+            n3_rrset = zobj.nsec3_matching(sname)
+            if n3_rrset:
+                self.add_rrset(zobj, self.response.authority, n3_rrset)
+
     def add_nsec_online(self, zobj, sname):
         """Generate online NSEC or NSEC3 RRset for given name"""
 
@@ -1295,6 +1317,11 @@ class DNSresponse:
             if rdataset:
                 if (qname != sname) or (stype not in [dns.rdatatype.DS, DELEG_TYPE]):
                     self.do_referral(zobj, sname, rdataset)
+                    return Finished.TRUE
+            if zobj.deleg_enabled:
+                deleg_rrset = zobj.get_rrset(sname, DELEG_TYPE)
+                if deleg_rrset:
+                    self.do_referral_deleg_only(zobj, sname, deleg_rrset)
                     return Finished.TRUE
 
         if sname == qname:

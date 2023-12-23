@@ -63,7 +63,7 @@ pip install siphash
 ```
 $ adns_server.py -h
 Reading config from: adnsconfig.yaml
-adns_server.py version 0.4.4
+adns_server.py version 0.4.5
 Usage: adns_server.py [<Options>]
 
 Options:
