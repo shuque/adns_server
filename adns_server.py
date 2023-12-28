@@ -393,18 +393,20 @@ class Zone(dns.zone.Zone):
 
     """
     Modified dns.zone.Zone class.
-    It uses the SortedDict class from sortedcontainers, rather than the
-    standard dict class. This maintains a sorted keylist, which makes
-    it easier to implement DNSSEC functions.
+
+    The nodes dictionary uses the SortedDict class from sortedcontainers,
+    rather than the standard dict class. This maintains a sorted keylist,
+    which makes it easier and more efficient to implement DNSSEC functions.
+
     When add_ent_nodes() is called, it will iterate through the zone and
     add all empty non-terminals as explicit nodes in the dictionary.
+
     Fully qualified origin must be specified. Doesn't support relativized
     names.
-    Supports methods for obtaining NSEC3/NSEC records for constructing
-    authenticated denial of existence responses.
     """
 
     node_factory = dns.node.Node
+    map_factory = SortedDict
 
     __slots__ = [
         'ent_nodes',
@@ -420,7 +422,7 @@ class Zone(dns.zone.Zone):
         """Initialize a zone object."""
 
         super().__init__(origin, rdclass, relativize=relativize)
-        self.nodes = SortedDict()
+        self.nodes = self.map_factory()
         self.ent_nodes = {}
         self.dnssec = False
         self.privatekey = None
@@ -555,12 +557,16 @@ def zone_from_file(name, zonefile, dnssec=False, key=None, deleg_enabled=False):
 
     zone = dns.zone.from_file(zonefile, origin=name, zone_factory=Zone,
                               relativize=False)
+
     # My custom Zone factory class converts the nodes attribute to a
     # SortedDict (to make it easier to implement DNSSEC functions).
     # Unfortunately dnspython 2.x undoes that conversion back to a dict.
-    # So we need to do this.
-    if not isinstance(zone.nodes, SortedDict):
-        zone.nodes = SortedDict(zone.nodes)
+    # So we need to perform this hack to convert it back. This appears to
+    # be fixed in dnspython 2.5 (not released yet) via the new map_factory
+    # attribute.
+    if not isinstance(zone.nodes, zone.map_factory):
+        zone.nodes = zone.map_factory(zone.nodes)
+
     zone.add_ent_nodes()
     zone.set_soa_min_ttl()
     if dnssec:
