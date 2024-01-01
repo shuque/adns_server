@@ -125,29 +125,27 @@ must be present.
     sys.exit(1)
 
 
-def init_config(only_zones=False):
+def init_config(prefs, zonedict, only_zones=False):
     """Initialize parameters and zone files from config file"""
 
-    global PREFS, ZONEDICT
-
-    with open(PREFS.config, 'r') as configfile:
+    with open(prefs.config, 'r') as configfile:
         ydoc = yaml.safe_load(configfile)
 
     if not only_zones:
         if "config" in ydoc:
             for key, val in ydoc['config'].items():
                 if key == 'port':
-                    PREFS.port = val
+                    prefs.port = val
                 elif key == 'edns':
-                    PREFS.edns_udp_max = val
+                    prefs.edns_udp_max = val
                 elif key == 'user':
-                    PREFS.username = val
+                    prefs.username = val
                 elif key == 'group':
-                    PREFS.groupname = val
+                    prefs.groupname = val
                 elif key == 'nsid':
-                    PREFS.nsid = val.encode()
+                    prefs.nsid = val.encode()
                 elif key == 'minimal_any':
-                    PREFS.minimal_any = val
+                    prefs.minimal_any = val
                 else:
                     print("error: unrecognized config option: {}".format(key))
                     sys.exit(1)
@@ -163,35 +161,32 @@ def init_config(only_zones=False):
             else:
                 privatekey = None
             try:
-                ZONEDICT.add(zonename, zonefile,
-                             dnssec=dnssec, key=privatekey, deleg_enabled=deleg_enabled)
+                zonedict.add(zonename, zonefile,
+                             dnssec=dnssec, key=privatekey,
+                             deleg_enabled=deleg_enabled)
             except dns.exception.DNSException as exc_info:
                 print("error: load zone {} failed: {}".format(
                     zonename, exc_info))
                 sys.exit(1)
-        ZONEDICT.set_zonelist()
-    if not ZONEDICT.get_zonelist():
+        zonedict.set_zonelist()
+    if not zonedict.get_zonelist():
         print("error: no zones defined.")
         sys.exit(1)
 
 
-def set_server_af(address):
+def set_server_af(prefs, address):
     """Set server's address family"""
 
-    global PREFS
-
     if address.find('.') != -1:
-        PREFS.server_af = 'IPv4'
+        prefs.server_af = 'IPv4'
     elif address.find(':') != -1:
-        PREFS.server_af = 'IPv6'
+        prefs.server_af = 'IPv6'
     else:
         raise ValueError("{} isn't a valid address".format(address))
 
 
-def process_args(arguments):
+def process_args(prefs, zonedict, arguments):
     """Process all command line arguments"""
-
-    global PREFS
 
     try:
         (options, args) = getopt.getopt(arguments, 'hc:dp:s:z:u:g:46fe:')
@@ -207,35 +202,34 @@ def process_args(arguments):
 
     config_supplied = [x for x in options if x[0] == '-c']
     if config_supplied:
-        PREFS.config = config_supplied[0][1]
+        prefs.config = config_supplied[0][1]
     print("Reading config from: {}".format(PREFS.config))
-    init_config()
+    init_config(prefs, zonedict)
 
     for (opt, optval) in options:
         if opt == "-d":
-            PREFS.debug = True
+            prefs.debug = True
         elif opt == "-p":
-            PREFS.port = int(optval)
+            prefs.port = int(optval)
         elif opt == "-s":
-            PREFS.server = optval
-            set_server_af(optval)
+            prefs.server = optval
+            set_server_af(PREFS, optval)
         elif opt == "-u":
-            PREFS.username = optval
+            prefs.username = optval
         elif opt == "-g":
-            PREFS.groupname = optval
+            prefs.groupname = optval
         elif opt == "-4":
-            PREFS.server_af = 'IPv4'
+            prefs.server_af = 'IPv4'
         elif opt == "-6":
-            PREFS.server_af = 'IPv6'
+            prefs.server_af = 'IPv6'
         elif opt == "-f":
-            PREFS.daemon = False
+            prefs.daemon = False
         elif opt == "-e":
-            PREFS.edns_udp_max = int(optval)
+            prefs.edns_udp_max = int(optval)
 
 
 def log_message(msg):
     """log informational message"""
-    global PREFS
 
     if PREFS.daemon:
         syslog.syslog(PREFS.syslog_pri, msg)
@@ -254,7 +248,7 @@ def handle_sighup(signum, frame):
     """handle SIGHUP - re-read configuration and zone files"""
     _, _ = signum, frame
     log_message('control: caught SIGHUP .. re-reading config and zones.')
-    init_config()
+    init_config(PREFS, ZONEDICT)
 
 
 def handle_sigterm(signum, frame):
@@ -1078,8 +1072,6 @@ class DNSresponse:
     def process_any_metatype(self, zobj, sname, wildcard):
         """Process ANY meta query"""
 
-        global PREFS
-
         rrname = wildcard if wildcard else sname
         rdatasets = zobj.get_node(sname).rdatasets
         if not rdatasets:
@@ -1358,7 +1350,6 @@ class DNSresponse:
     def find_answer(self, qname, qtype):
         """Find answer for name and type"""
 
-        global ZONEDICT
         zobj = ZONEDICT.find(qname)
         if zobj is None:
             if not self.response.answer:
@@ -1596,9 +1587,7 @@ def setup_sockets(family, server, port):
 def main(arguments):
     """Main function ..."""
 
-    global PREFS
-
-    process_args(arguments[1:])
+    process_args(PREFS, ZONEDICT, arguments[1:])
     PREFS.cookie_secret = binascii.hexlify(random.randbytes(8))
 
     if PREFS.daemon:
