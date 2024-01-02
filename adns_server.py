@@ -1584,10 +1584,9 @@ def setup_sockets(family, server, port):
     return fd_read, dispatch
 
 
-def main(arguments):
-    """Main function ..."""
+def setup_server():
+    """Setup server ..."""
 
-    process_args(PREFS, ZONEDICT, arguments[1:])
     PREFS.cookie_secret = binascii.hexlify(random.randbytes(8))
 
     if PREFS.daemon:
@@ -1605,14 +1604,17 @@ def main(arguments):
         drop_privs(PREFS.username, PREFS.groupname)
 
     log_message("info: Listening on UDP and TCP port %d" % PREFS.port)
+    return fd_read, dispatch
+
+
+def run_event_loop(fd_read, dispatch):
+    """Run main event loop ..."""
 
     while True:
-
         try:
             (ready_r, _, _) = select.select(fd_read, [], [], 5)
         except OSError as exc_info:
             log_fatal("error: from select(): {}".format(exc_info))
-
         if not ready_r:
             continue
 
@@ -1630,9 +1632,9 @@ def main(arguments):
 
 if __name__ == '__main__':
 
-    # Globals
+    tlock = threading.Lock()
     PREFS = Preferences()
     ZONEDICT = ZoneDict()
-    tlock = threading.Lock()
-
-    main(sys.argv)
+    process_args(PREFS, ZONEDICT, sys.argv[1:])
+    FD_READ, DISPATCH = setup_server()
+    run_event_loop(FD_READ, DISPATCH)
