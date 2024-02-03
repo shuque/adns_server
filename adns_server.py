@@ -46,22 +46,27 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION = '0.4.5'
+VERSION = '0.4.6'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
 
-# Parameters for online signing with Compact Answers
+# Parameters for online signing
 RRSIG_INCEPTION_OFFSET = 3600
 RRSIG_LIFETIME = 172800
-NXNAME_TYPE = 65283                   # NXNAME Pseudo RR type
-EDNS_FLAG_CO = 0x4000                 # Compact Answer OK (CO) EDNS Header Flag
 
-# Other parameters
+# Cookie parameters
 COOKIE_TIMESTAMP_DRIFT = 86400        # Allowed DNS Cookie timestamp drift (secs)
 COOKIE_RECALCULATE_TIME = 21600
 
-# Experimental testing of DELEG with private RRtype
-DELEG_TYPE = 65287
+class RRtype(enum.IntEnum):
+    """Resource Record types"""
+    NXNAME = 65283
+    DELEG = 65287
 
+class EdnsFlag(enum.IntFlag):
+    """EDNS Header Flags"""
+    DNSSEC_OK = 0x8000
+    COMPACT_OK = 0x4000
+    DELEG_OK = 0x2000
 
 class Finished(enum.Flag):
     """Finished Boolean enum"""
@@ -637,7 +642,12 @@ def query_meta_type(qtype):
 
 def compact_answer_ok(message):
     """Does DNS message have Compact Answers OK EDNS header flag set?"""
-    return message.ednsflags & EDNS_FLAG_CO == EDNS_FLAG_CO
+    return message.ednsflags & EdnsFlag.COMPACT_OK == EdnsFlag.COMPACT_OK
+
+
+def deleg_ok(message):
+    """Does DNS message have DELEG OK EDNS header flag set"""
+    return message.ednsflags & EdnsFlag.DELEG_OK == EdnsFlag.DELEG_OK
 
 
 def sign_rrset(zone, rrset):
@@ -911,7 +921,7 @@ class DNSresponse:
         if compact_answer_ok(self.query.message):
             self.response.set_rcode(dns.rcode.NXDOMAIN)
 
-        rrtypes = [dns.rdatatype.RRSIG, dns.rdatatype.NSEC, NXNAME_TYPE]
+        rrtypes = [dns.rdatatype.RRSIG, dns.rdatatype.NSEC, RRtype.NXNAME]
         nextname = dns.name.Name((b'\x00',) + self.qname.labels)
         nsec_rrset = make_nsec_rrset(self.qname, nextname, rrtypes, zobj.soa_min_ttl)
         self.add_rrset(zobj, self.response.authority, nsec_rrset)
@@ -1138,19 +1148,43 @@ class DNSresponse:
         """Generate referral response to child zone"""
 
         self.is_referral = True
+        if zobj.deleg_enabled:
+            self.do_referral_deleg(zobj, sname, rdataset)
+            return
+
         ns_rrset = dns.rrset.RRset(sname, dns.rdataclass.IN, dns.rdatatype.NS)
         ns_rrset.update(rdataset)
         self.add_rrset(zobj, self.response.authority, ns_rrset, authoritative=False)
-
         self.get_glue(zobj, sname, rdataset)
 
-        # Lookup experimental DELEG RRset
-        if zobj.deleg_enabled:
-            deleg_rrset = zobj.get_rrset(sname, DELEG_TYPE)
+        if zobj.dnssec:
+            ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
+            if ds_rrset:
+                self.add_rrset(zobj, self.response.authority, ds_rrset)
+            else:
+                # Insecure referral - add NSEC record matching delegation name
+                self.add_nsec_matching(zobj, sname)
 
-        # For unsigned zones or DO=0 queries, return DELEG (if enabled) and return
+    def do_referral_deleg(self, zobj, sname, rdataset):
+        """Generate DELEG enabled referral response to child zone"""
+
+        deleg_rrset = zobj.get_rrset(sname, RRtype.DELEG)
+        if deleg_rrset and deleg_ok(self.query.message):
+            self.add_rrset(zobj, self.response.authority, deleg_rrset)
+            # If we decide to always add NSEC, uncomment this
+            #if (zobj.dnssec and self.dnssec_ok()):
+            #    self.add_nsec_matching(zobj, sname)
+            return
+
+        self.is_referral = True
+        ns_rrset = dns.rrset.RRset(sname, dns.rdataclass.IN, dns.rdatatype.NS)
+        ns_rrset.update(rdataset)
+        self.add_rrset(zobj, self.response.authority, ns_rrset, authoritative=False)
+        self.get_glue(zobj, sname, rdataset)
+
+        # For unsigned zones or DO=0 queries, return DELEG (if present) and return
         if not (zobj.dnssec and self.dnssec_ok()):
-            if zobj.deleg_enabled and deleg_rrset:
+            if deleg_rrset:
                 self.add_rrset(zobj, self.response.authority, deleg_rrset)
             return
 
@@ -1158,17 +1192,24 @@ class DNSresponse:
         if ds_rrset:
             self.add_rrset(zobj, self.response.authority, ds_rrset)
 
-        if zobj.deleg_enabled and deleg_rrset:
+        if deleg_rrset:
             self.add_rrset(zobj, self.response.authority, deleg_rrset)
 
-        if zobj.deleg_enabled:
-            if ds_rrset and deleg_rrset:
-                return
-        else:
-            if ds_rrset:
-                return
+        if not (ds_rrset and deleg_rrset):
+            # Insecure referral or only one of {DS,DELEG}. Add NSEC matching sname
+            self.add_nsec_matching(zobj, sname)
 
-        # Insecure referral or only one of {DS,DELEG}. Add NSEC record matching sname
+    def do_referral_deleg_only(self, zobj, sname, deleg_rrset):
+        """Do DELEG-only referral - future looking"""
+
+        self.is_referral = True
+        self.add_rrset(zobj, self.response.authority, deleg_rrset)
+
+        # if DS exists, return it too (may have DS shim signal)
+        ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
+        if ds_rrset:
+            self.add_rrset(zobj, self.response.authority, ds_rrset)
+
         if zobj.online_signing():
             self.add_nsec_online(zobj, sname)
         elif zobj.nsec3param is None:
@@ -1194,16 +1235,8 @@ class DNSresponse:
                     rrset.update(rdataset)
                     self.add_rrset(zobj, self.response.additional, rrset, authoritative=False)
 
-    def do_referral_deleg_only(self, zobj, sname, deleg_rrset):
-        """Do DELEG-only referral - future looking"""
-
-        self.is_referral = True
-        self.add_rrset(zobj, self.response.authority, deleg_rrset)
-
-        # if DS exists, return it too (may have DS shim signal)
-        ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
-        if ds_rrset:
-            self.add_rrset(zobj, self.response.authority, ds_rrset)
+    def add_nsec_matching(self, zobj, sname):
+        """Add NSEC or NSEC3 record matching name"""
 
         if zobj.online_signing():
             self.add_nsec_online(zobj, sname)
@@ -1313,14 +1346,15 @@ class DNSresponse:
         if sname != zobj.origin:
             rdataset = zobj.get_rdataset(sname, dns.rdatatype.NS)
             if rdataset:
-                if (qname != sname) or (stype not in [dns.rdatatype.DS, DELEG_TYPE]):
+                if (qname != sname) or (stype not in [dns.rdatatype.DS, RRtype.DELEG]):
                     self.do_referral(zobj, sname, rdataset)
                     return Finished.TRUE
-            if zobj.deleg_enabled:
-                deleg_rrset = zobj.get_rrset(sname, DELEG_TYPE)
+            if zobj.deleg_enabled and deleg_ok(self.query.message):
+                deleg_rrset = zobj.get_rrset(sname, RRtype.DELEG)
                 if deleg_rrset:
-                    self.do_referral_deleg_only(zobj, sname, deleg_rrset)
-                    return Finished.TRUE
+                    if (qname != sname) or (stype not in [dns.rdatatype.DS, RRtype.DELEG]):
+                        self.do_referral_deleg_only(zobj, sname, deleg_rrset)
+                        return Finished.TRUE
 
         if sname == qname:
             self.find_rrtype(zobj, sname, stype)
@@ -1453,7 +1487,10 @@ class DNSresponse:
         if self.dnssec_ok():
             self.edns_flags = dns.flags.DO
             if compact_answer_ok(self.query.message):
-                self.edns_flags |= EDNS_FLAG_CO
+                self.edns_flags |= EdnsFlag.COMPACT_OK
+
+        if deleg_ok(self.query.message):
+            self.edns_flags |= EdnsFlag.DELEG_OK
 
         for option in self.query.message.options:
             if PREFS.nsid and (option.otype == dns.edns.NSID):
@@ -1503,7 +1540,7 @@ class DNSresponse:
                 self.response.set_rcode(dns.rcode.REFUSED)
                 return
 
-            if query_meta_type(self.qtype) or self.qtype == NXNAME_TYPE:
+            if query_meta_type(self.qtype) or self.qtype == RRtype.NXNAME:
                 self.response.set_rcode(dns.rcode.REFUSED)
                 return
 
