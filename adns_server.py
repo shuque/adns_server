@@ -15,6 +15,7 @@ import grp
 import syslog
 import struct
 import socket
+import atexit
 import select
 import threading
 import signal
@@ -48,6 +49,7 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 PROGNAME = os.path.basename(sys.argv[0])
 VERSION = '0.4.6'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
+PID_FILE = f'/tmp/{PROGNAME}.pid'
 
 # Parameters for online signing
 RRSIG_INCEPTION_OFFSET = 3600
@@ -272,20 +274,35 @@ def install_signal_handlers():
 def daemon(dirname=None, syslog_fac=syslog.LOG_DAEMON):
     """Turn into daemon"""
 
+    if os.path.exists(PID_FILE):
+        print(f"File {PID_FILE} already exists.")
+        sys.exit(1)
+
     umask_value = 0o022
 
     try:
-        pid = os.fork()
+        pid = os.fork()  # Detach from parent
         if pid > 0:
             sys.exit(0)
     except OSError as einfo:
-        print("fork() failed: %s" % einfo)
+        print("fork() #1 failed: %s" % einfo)
         sys.exit(1)
     else:
+        try:
+            pid = os.fork()  # Relinquish session leadership
+            if pid > 0:
+                sys.exit(0)
+        except OSError as einfo:
+            print("fork() #2 failed: %s" % einfo)
+            sys.exit(1)
         if dirname:
             os.chdir(dirname)
         os.umask(umask_value)
         os.setsid()
+
+        with open(PID_FILE, 'w') as pid_f:
+            pid_f.write(str(os.getpid()))
+        atexit.register(lambda: os.remove(PID_FILE))
 
         for file_desc in range(0, os.sysconf("SC_OPEN_MAX")):
             try:
