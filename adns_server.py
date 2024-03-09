@@ -47,9 +47,8 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION = '0.4.6'
+VERSION = '0.5.0'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
-PID_FILE = f'/tmp/{PROGNAME}.pid'
 
 # Parameters for online signing
 RRSIG_INCEPTION_OFFSET = 3600
@@ -90,6 +89,7 @@ class Preferences:
     syslog_fac = syslog.LOG_DAEMON    # Syslog facility
     syslog_pri = syslog.LOG_INFO      # Syslog priority
     workdir = None                    # Working directory to change to
+    pidfile = None                    # PID file
     edns_udp_max = 1432               # -e: Max EDNS UDP payload we send
     edns_udp_adv = 1232               # Max EDNS UDP payload we advertise
     nsid = None                       # NSID option string
@@ -143,6 +143,10 @@ def init_config(prefs, zonedict, only_zones=False):
             for key, val in ydoc['config'].items():
                 if key == 'port':
                     prefs.port = val
+                elif key == 'workdir':
+                    prefs.workdir = val
+                elif key == 'pidfile':
+                    prefs.pidfile = val
                 elif key == 'edns':
                     prefs.edns_udp_max = val
                 elif key == 'user':
@@ -156,29 +160,42 @@ def init_config(prefs, zonedict, only_zones=False):
                 else:
                     print("error: unrecognized config option: {}".format(key))
                     sys.exit(1)
+
     if "zones" in ydoc:
-        for entry in ydoc['zones']:
-            zonename = entry['name']
-            zonefile = entry['file']
-            dnssec = entry.get('dnssec', False)
-            dynamic_signing = entry.get('dynamic_signing', False)
-            deleg_enabled = entry.get('deleg_enabled', False)
-            if dnssec and dynamic_signing:
-                privatekey = load_private_key(entry['private_key'])
-            else:
-                privatekey = None
-            try:
-                zonedict.add(zonename, zonefile,
-                             dnssec=dnssec, key=privatekey,
-                             deleg_enabled=deleg_enabled)
-            except dns.exception.DNSException as exc_info:
-                print("error: load zone {} failed: {}".format(
-                    zonename, exc_info))
-                sys.exit(1)
-        zonedict.set_zonelist()
+        load_zones(prefs, zonedict, ydoc['zones'])
+
     if not zonedict.get_zonelist():
         print("error: no zones defined.")
         sys.exit(1)
+
+
+def load_zones(prefs, zonedict, zoneconfig):
+    """Load zones"""
+
+    for entry in zoneconfig:
+        zonename = entry['name']
+        zonefile = entry['file']
+        if not zonefile.startswith('/') and prefs.workdir:
+            zonefile = os.path.join(prefs.workdir, zonefile)
+        dnssec = entry.get('dnssec', False)
+        dynamic_signing = entry.get('dynamic_signing', False)
+        deleg_enabled = entry.get('deleg_enabled', False)
+        if dnssec and dynamic_signing:
+            privatekey_path = entry['private_key']
+            if not privatekey_path.startswith('/') and prefs.workdir:
+                privatekey_path = os.path.join(prefs.workdir, privatekey_path)
+            privatekey = load_private_key(privatekey_path)
+        else:
+            privatekey = None
+        try:
+            zonedict.add(zonename, zonefile,
+                         dnssec=dnssec, key=privatekey,
+                         deleg_enabled=deleg_enabled)
+        except dns.exception.DNSException as exc_info:
+            print("error: load zone {} failed: {}".format(
+                zonename, exc_info))
+            sys.exit(1)
+    zonedict.set_zonelist()
 
 
 def set_server_af(prefs, address):
@@ -271,47 +288,59 @@ def install_signal_handlers():
     signal.signal(signal.SIGHUP, handle_sighup)
 
 
+def get_pid_file():
+    """Get name of PID file to create"""
+
+    if PREFS.pidfile:
+        return PREFS.pidfile
+    if PREFS.workdir:
+        return os.path.join(PREFS.workdir, 'daemon.pid')
+    return f'/tmp/{PROGNAME}.pid'
+
+
 def daemon(dirname=None, syslog_fac=syslog.LOG_DAEMON):
     """Turn into daemon"""
 
-    if os.path.exists(PID_FILE):
-        print(f"File {PID_FILE} already exists.")
+    pidfile = get_pid_file()
+    if os.path.exists(pidfile):
+        print(f"File {pidfile} already exists.")
         sys.exit(1)
 
     umask_value = 0o022
 
     try:
-        pid = os.fork()  # Detach from parent
+        pid = os.fork()
         if pid > 0:
             sys.exit(0)
     except OSError as einfo:
         print("fork() #1 failed: %s" % einfo)
         sys.exit(1)
-    else:
+
+    if dirname:
+        os.chdir(dirname)
+
+    os.umask(umask_value)
+    os.setsid()
+
+    try:
+        pid = os.fork()
+        if pid > 0:
+            sys.exit(0)
+    except OSError as einfo:
+        print("fork() #2 failed: %s" % einfo)
+        sys.exit(1)
+
+    with open(pidfile, 'w') as pid_f:
+        pid_f.write(f'{os.getpid()}\n')
+    atexit.register(lambda: os.remove(pidfile))
+
+    for file_desc in range(0, os.sysconf("SC_OPEN_MAX")):
         try:
-            pid = os.fork()  # Relinquish session leadership
-            if pid > 0:
-                sys.exit(0)
-        except OSError as einfo:
-            print("fork() #2 failed: %s" % einfo)
-            sys.exit(1)
-        if dirname:
-            os.chdir(dirname)
-        os.umask(umask_value)
-        os.setsid()
+            os.close(file_desc)
+        except OSError:
+            pass
 
-        with open(PID_FILE, 'w') as pid_f:
-            pid_f.write(str(os.getpid()))
-        atexit.register(lambda: os.remove(PID_FILE))
-
-        for file_desc in range(0, os.sysconf("SC_OPEN_MAX")):
-            try:
-                os.close(file_desc)
-            except OSError:
-                pass
-
-        syslog.openlog(PROGNAME, syslog.LOG_PID, syslog_fac)
-        return
+    syslog.openlog(PROGNAME, syslog.LOG_PID, syslog_fac)
 
 
 def drop_privs(uname, gname):
