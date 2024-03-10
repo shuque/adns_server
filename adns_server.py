@@ -214,7 +214,7 @@ def process_args(prefs, zonedict, arguments):
     """Process all command line arguments"""
 
     try:
-        (options, args) = getopt.getopt(arguments, 'hc:dp:s:z:u:g:46fe:')
+        (options, args) = getopt.getopt(arguments, 'hc:dp:s:z:u:g:46fe:x:')
     except getopt.GetoptError as error_info:
         usage(str(error_info))
 
