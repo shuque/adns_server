@@ -125,6 +125,7 @@ Options:
        -f:        Remain attached to foreground (default don't)
        -e N:      Max EDNS bufsize in octets for responses we send out.
                   (-e 0 will disable EDNS support)
+       -x file:   Name of file to write the PID      
 
 Note: a configuration file that minimally specifies the zones to load
 must be present.
@@ -250,6 +251,8 @@ def process_args(prefs, zonedict, arguments):
             prefs.daemon = False
         elif opt == "-e":
             prefs.edns_udp_max = int(optval)
+        elif opt == "-x":
+            prefs.pidfile = optval
 
 
 def log_message(msg):
