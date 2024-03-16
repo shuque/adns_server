@@ -1,0 +1,9 @@
+Desired modifications to how a zone will be served:
+- Invalidate DNSSEC
+  - Break the signature for the RRsig on this type of record
+  - Make the valid-from time in the past for the RRsig on this type of record
+  - Change the algorithm unknown for the RRsig on this type of record
+- Remove some expected records
+	- Remove this RRset from this section
+- Add unexpected records
+  - Add this specified record to this section
