@@ -178,9 +178,9 @@ def load_zones(prefs, zonedict, zoneconfig):
         if not zonefile.startswith('/') and prefs.workdir:
             zonefile = os.path.join(prefs.workdir, zonefile)
         dnssec = entry.get('dnssec', False)
-        additions = entry.get('addtions', {})     ##########################
         dynamic_signing = entry.get('dynamic_signing', False)
         deleg_enabled = entry.get('deleg_enabled', False)
+        additions = entry.get('additions', {})
         if dnssec and dynamic_signing:
             privatekey_path = entry['private_key']
             if not privatekey_path.startswith('/') and prefs.workdir:
