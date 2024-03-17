@@ -178,6 +178,7 @@ def load_zones(prefs, zonedict, zoneconfig):
         if not zonefile.startswith('/') and prefs.workdir:
             zonefile = os.path.join(prefs.workdir, zonefile)
         dnssec = entry.get('dnssec', False)
+        additions = entry.get('addtions', {})     ##########################
         dynamic_signing = entry.get('dynamic_signing', False)
         deleg_enabled = entry.get('deleg_enabled', False)
         if dnssec and dynamic_signing:
@@ -460,7 +461,8 @@ class Zone(dns.zone.Zone):
         'signing_dnskey',
         'keytag',
         'nsec3param',
-        'deleg_enabled'
+        'deleg_enabled',
+        'additions'
     ]
 
     def __init__(self, origin, rdclass=dns.rdataclass.IN, relativize=False):
@@ -473,6 +475,7 @@ class Zone(dns.zone.Zone):
         self.privatekey = None
         self.signing_dnskey = None
         self.deleg_enabled = False
+        self.additions = {}
         self.keytag = None
         self.nsec3param = None
         self.soa_min_ttl = None
@@ -496,6 +499,10 @@ class Zone(dns.zone.Zone):
     def set_deleg(self, deleg_enabled):
         """Set deleg_enabled flag"""
         self.deleg_enabled = deleg_enabled
+
+    def set_additions(self, additions):
+        """Set the dict of additions"""
+        self.additions = additions
 
     def set_soa_min_ttl(self):
         """Calculate SOA min TTL value"""
@@ -597,7 +604,7 @@ class Zone(dns.zone.Zone):
         return "<Zone: {}>".format(self.origin)
 
 
-def zone_from_file(name, zonefile, dnssec=False, key=None, deleg_enabled=False):
+def zone_from_file(name, zonefile, dnssec=False, key=None, deleg_enabled=False, additions={}):
     """Obtain Zone object from zone name and file"""
 
     zone = dns.zone.from_file(zonefile, origin=name, zone_factory=Zone,
@@ -619,6 +626,7 @@ def zone_from_file(name, zonefile, dnssec=False, key=None, deleg_enabled=False):
         if key is not None:
             zone.init_key(key)
     zone.set_deleg(deleg_enabled)
+    zone.set_additions(additions)
     return zone
 
 
@@ -637,10 +645,10 @@ class ZoneDict:
         """Return zone list"""
         return self.zonelist
 
-    def add(self, zonename, zonefile, dnssec=False, key=None, deleg_enabled=False):
+    def add(self, zonename, zonefile, dnssec=False, key=None, deleg_enabled=False, additions={}):
         """Create and add zonename->zone object"""
         zonename = dns.name.from_text(zonename)
-        self.data[zonename] = zone_from_file(zonename, zonefile, dnssec, key, deleg_enabled)
+        self.data[zonename] = zone_from_file(zonename, zonefile, dnssec, key, deleg_enabled, additions)
 
     def find(self, qname):
         """Return closest enclosing zone object for the qname"""
