@@ -104,15 +104,15 @@ def usage(msg=None):
     """Print usage string and exit"""
 
     if msg is not None:
-        print("ERROR: {}\n".format(msg))
+        print(f"ERROR: {msg}\n")
 
-    print("""\
-{0} version {1}
-Usage: {0} [<Options>]
+    print(f"""\
+{PROGNAME} version {VERSION}
+Usage: {PROGNAME} [<Options>]
 
 Options:
        -h:        Print usage string
-       -c file:   Configuration file (default '{2}')
+       -c file:   Configuration file (default '{CONFIG_DEFAULT}')
        -d:        Turn on debugging
        -p N:      Listen on port N (default 53)
        -s A:      Bind to server address A (default wildcard address)
@@ -128,14 +128,14 @@ Options:
 
 Note: a configuration file that minimally specifies the zones to load
 must be present.
-""".format(PROGNAME, VERSION, CONFIG_DEFAULT))
+""")
     sys.exit(1)
 
 
 def init_config(prefs, zonedict, only_zones=False):
     """Initialize parameters and zone files from config file"""
 
-    with open(prefs.config, 'r') as configfile:
+    with open(prefs.config, 'r', encoding="utf-8") as configfile:
         ydoc = yaml.safe_load(configfile)
 
     if not only_zones:
@@ -158,7 +158,7 @@ def init_config(prefs, zonedict, only_zones=False):
                 elif key == 'minimal_any':
                     prefs.minimal_any = val
                 else:
-                    print("error: unrecognized config option: {}".format(key))
+                    print(f"error: unrecognized config option: {key}")
                     sys.exit(1)
 
     if "zones" in ydoc:
@@ -192,8 +192,7 @@ def load_zones(prefs, zonedict, zoneconfig):
                          dnssec=dnssec, key=privatekey,
                          deleg_enabled=deleg_enabled)
         except dns.exception.DNSException as exc_info:
-            print("error: load zone {} failed: {}".format(
-                zonename, exc_info))
+            print(f"error: load zone {zonename} failed: {exc_info}")
             sys.exit(1)
     zonedict.set_zonelist()
 
@@ -206,7 +205,7 @@ def set_server_af(prefs, address):
     elif address.find(':') != -1:
         prefs.server_af = 'IPv6'
     else:
-        raise ValueError("{} isn't a valid address".format(address))
+        raise ValueError(f"{address} isn't a valid address")
 
 
 def process_args(prefs, zonedict, arguments):
@@ -218,7 +217,7 @@ def process_args(prefs, zonedict, arguments):
         usage(str(error_info))
 
     if args:
-        usage("No additional arguments allowed: {}".format(" ".join(args)))
+        usage(f"No additional arguments allowed: {' '.join(args)}")
 
     help_requested = [x for x in options if x[0] == '-h']
     if help_requested:
@@ -227,7 +226,7 @@ def process_args(prefs, zonedict, arguments):
     config_supplied = [x for x in options if x[0] == '-c']
     if config_supplied:
         prefs.config = config_supplied[0][1]
-    print("Reading config from: {}".format(PREFS.config))
+    print(f"Reading config from: {PREFS.config}")
     init_config(prefs, zonedict)
 
     for (opt, optval) in options:
@@ -313,7 +312,7 @@ def daemon(dirname=None, syslog_fac=syslog.LOG_DAEMON):
         if pid > 0:
             sys.exit(0)
     except OSError as einfo:
-        print("fork() #1 failed: %s" % einfo)
+        print(f"fork() #1 failed: {einfo:s}")
         sys.exit(1)
 
     if dirname:
@@ -327,10 +326,10 @@ def daemon(dirname=None, syslog_fac=syslog.LOG_DAEMON):
         if pid > 0:
             sys.exit(0)
     except OSError as einfo:
-        print("fork() #2 failed: %s" % einfo)
+        print(f"fork() #2 failed: {einfo:s}")
         sys.exit(1)
 
-    with open(pidfile, 'w') as pid_f:
+    with open(pidfile, 'w', encoding="utf-8") as pid_f:
         pid_f.write(f'{os.getpid()}\n')
     atexit.register(lambda: os.remove(pidfile))
 
@@ -405,10 +404,9 @@ def send_socket(sock, message):
                 raise ValueError("send() returned 0 bytes")
             octets_sent += sentn
     except OSError as diag:
-        log_message("error: sendSocket() exception: {}".format(diag))
+        log_message(f"error: sendSocket() exception: {diag}")
         return False
-    else:
-        return True
+    return True
 
 
 def recv_socket(sock, num_octets):
@@ -514,9 +512,7 @@ class Zone(dns.zone.Zone):
             if name == self.origin:
                 continue
             current_name = name
-            while True:
-                if current_name in seen:
-                    break
+            while current_name not in seen:
                 seen[current_name] = 1
                 parent = current_name.parent()
                 if parent == self.origin:
@@ -594,7 +590,7 @@ class Zone(dns.zone.Zone):
         return None
 
     def __str__(self):
-        return "<Zone: {}>".format(self.origin)
+        return f"<Zone: {self.origin}>"
 
 
 def zone_from_file(name, zonefile, dnssec=False, key=None, deleg_enabled=False):
@@ -659,7 +655,7 @@ def hashalg(algnum):
 
     if algnum == 1:
         return hashlib.sha1
-    raise ValueError("unsupported NSEC3 hash algorithm {}".format(algnum))
+    raise ValueError(f"unsupported NSEC3 hash algorithm {algnum}")
 
 
 def nsec3hash(name, algnum, wire_salt, iterations, binary_out=False):
@@ -803,8 +799,7 @@ class DNSquery:
         try:
             self.message = dns.message.from_wire(self.wire_message)
         except dns.exception.DNSException as exc_info:
-            log_message("error: can't parse query: {}: {}".format(
-                type(exc_info), exc_info))
+            log_message(f"error: can't parse query: {type(exc_info)}: {exc_info}")
             self.message = None
             self.malformed = True
         else:
@@ -821,7 +816,7 @@ class DNSquery:
         edns_version = self.message.edns
         if edns_version == -1:
             return ""
-        flags = "0x%04x" % self.message.ednsflags
+        flags = f'0x{self.message.ednsflags:04x}'
         options = ",".join([str(int(x.otype)) for x in self.message.options])
         result = f"edns=v{edns_version}/{flags}/{self.message.payload}"
         if options:
@@ -832,16 +827,14 @@ class DNSquery:
         """Log information about incoming DNS query"""
         transport = "TCP" if self.tcp else "UDP"
         if self.headeronly:
-            msg = 'query: %s header-only from: %s,%d size=%d' % \
-                    (transport,
-                     self.cliaddr, self.cliport, self.msg_len)
+            msg = (f'query: {transport} header-only '
+                   f'from: {self.cliaddr},{self.cliport} size={self.msg_len}')
         else:
-            msg = 'query: %s %s %s %s from: %s,%d size=%d' % \
-                    (transport,
-                     self.qname,
-                     dns.rdatatype.to_text(self.qtype),
-                     dns.rdataclass.to_text(self.qclass),
-                     self.cliaddr, self.cliport, self.msg_len)
+            msg = (f'query: {transport} '
+                   f'{self.qname} '
+                   f'{dns.rdatatype.to_text(self.qtype)} '
+                   f'{dns.rdataclass.to_text(self.qclass)} '
+                   f'from: {self.cliaddr},{self.cliport} size={self.msg_len}')
         edns_log_message = self.edns_log_info()
         if edns_log_message:
             msg = msg + " " + edns_log_message
@@ -1319,7 +1312,7 @@ class DNSresponse:
         """Process CNAME"""
 
         if sname in self.cname_owner_list:
-            log_message("error: CNAME loop detected at {}".format(sname))
+            log_message(f"error: CNAME loop detected at {sname}")
             self.response.set_rcode(dns.rcode.SERVFAIL)
             return
         self.cname_owner_list.append(sname)
@@ -1334,7 +1327,7 @@ class DNSresponse:
         """Process DNAME"""
 
         if sname in self.dname_owner_list:
-            log_message("error: DNAME loop detected at {}".format(sname))
+            log_message(f"error: DNAME loop detected at {sname}")
             self.response.set_rcode(dns.rcode.SERVFAIL)
             return
         self.dname_owner_list.append(sname)
@@ -1623,8 +1616,8 @@ def handle_connection_udp(sock, rbufsize=2048):
     data, addrport = sock.recvfrom(rbufsize)
     cliaddr, cliport = addrport[0:2]
     if PREFS.debug:
-        log_message("connect: UDP from (%s, %d) msgsize=%d" %
-                    (cliaddr, cliport, len(data)))
+        log_message(f"connect: UDP from ({cliaddr}, {cliport}) "
+                    f"msgsize={len(data)}")
     query = DNSquery(data, cliaddr=cliaddr, cliport=cliport)
     handle_query(query, sock)
 
@@ -1635,8 +1628,8 @@ def handle_connection_tcp(sock, addr, rbufsize=2048):
     data = sock.recv(rbufsize)
     cliaddr, cliport = addr[0:2]
     if PREFS.debug:
-        log_message("connect: TCP from (%s, %d) msgsize=%d" %
-                    (cliaddr, cliport, len(data)))
+        log_message(f"connect: TCP from ({cliaddr}, {cliport}) "
+                    f"msgsize={len(data)}")
     query = DNSquery(data, cliaddr=cliaddr, cliport=cliport, tcp=True)
     handle_query(query, sock)
     sock.close()
@@ -1675,18 +1668,18 @@ def setup_server():
     if PREFS.daemon:
         daemon(dirname=PREFS.workdir)
     install_signal_handlers()
-    log_message("info: {} version {}: running".format(PROGNAME, VERSION))
+    log_message(f"info: {PROGNAME} version {VERSION}: running")
 
     try:
         fd_read, dispatch = setup_sockets(PREFS.server_af,
                                           PREFS.server, PREFS.port)
     except PermissionError as exc_info:
-        log_fatal("Error setting up sockets: {}".format(exc_info))
+        log_fatal(f"Error setting up sockets: {exc_info}")
 
     if PREFS.username or PREFS.groupname:
         drop_privs(PREFS.username, PREFS.groupname)
 
-    log_message("info: Listening on UDP and TCP port %d" % PREFS.port)
+    log_message(f"info: Listening on UDP and TCP port {PREFS.port}")
     return fd_read, dispatch
 
 
@@ -1697,7 +1690,7 @@ def run_event_loop(fd_read, dispatch):
         try:
             (ready_r, _, _) = select.select(fd_read, [], [], 5)
         except OSError as exc_info:
-            log_fatal("error: from select(): {}".format(exc_info))
+            log_fatal(f"error: from select(): {exc_info}")
         if not ready_r:
             continue
 
