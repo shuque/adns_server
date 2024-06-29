@@ -73,6 +73,8 @@ fail-on=
 # a server-like mode.
 clear-cache-post-run=no
 
+#max-public-methods=7
+max-public-methods=40
 
 [MESSAGES CONTROL]
 
@@ -429,7 +431,8 @@ max-branches = 20
 max-statements = 50
 
 # Maximum number of attributes for a class (see R0902).
-max-attributes=11
+#max-attributes=11
+max-attributes=13
 
 # Maximum number of statements in a try-block
 max-try-statements = 7
