@@ -47,7 +47,7 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION = '0.5.0'
+VERSION = '0.5.1'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
 
 # Parameters for online signing
@@ -60,7 +60,7 @@ COOKIE_RECALCULATE_TIME = 21600
 
 class RRtype(enum.IntEnum):
     """Resource Record types"""
-    NXNAME = 65283
+    NXNAME = 128
     DELEG = 65287
 
 class EdnsFlag(enum.IntFlag):
@@ -68,6 +68,10 @@ class EdnsFlag(enum.IntFlag):
     DNSSEC_OK = 0x8000
     COMPACT_OK = 0x4000
     DELEG_OK = 0x2000
+
+class EDECode(enum.IntEnum):
+    """Extended DNS Error Codes"""
+    INVALID_QTYPE = 30
 
 class Finished(enum.Flag):
     """Finished Boolean enum"""
@@ -1579,8 +1583,13 @@ class DNSresponse:
                 self.response.set_rcode(dns.rcode.REFUSED)
                 return
 
-            if query_meta_type(self.qtype) or self.qtype == RRtype.NXNAME:
-                self.response.set_rcode(dns.rcode.REFUSED)
+            if query_meta_type(self.qtype):
+                self.response.set_rcode(dns.rcode.FORMERR)
+                if self.query.message.edns != -1:
+                    option = dns.edns.EDEOption(EDECode.INVALID_QTYPE,
+                                                "Invalid Query Type")
+                    self.edns_options.append(option)
+                    self.do_edns_final()
                 return
 
             self.find_answer(self.qname, self.qtype)
