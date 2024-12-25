@@ -183,6 +183,7 @@ def load_zones(prefs, zonedict, zoneconfig):
             zonefile = os.path.join(prefs.workdir, zonefile)
         dnssec = entry.get('dnssec', False)
         dynamic_signing = entry.get('dynamic_signing', False)
+        compact_denial = entry.get('compact_denial', False)
         deleg_enabled = entry.get('deleg_enabled', False)
         if dnssec and dynamic_signing:
             privatekey_path = entry['private_key']
@@ -194,6 +195,7 @@ def load_zones(prefs, zonedict, zoneconfig):
         try:
             zonedict.add(zonename, zonefile,
                          dnssec=dnssec, key=privatekey,
+                         compact_denial=compact_denial,
                          deleg_enabled=deleg_enabled)
         except dns.exception.DNSException as exc_info:
             print(f"error: load zone {zonename} failed: {exc_info}")
@@ -462,6 +464,7 @@ class Zone(dns.zone.Zone):
         'signing_dnskey',
         'keytag',
         'nsec3param',
+        'compact_denial',
         'deleg_enabled'
     ]
 
@@ -474,6 +477,7 @@ class Zone(dns.zone.Zone):
         self.dnssec = False
         self.privatekey = None
         self.signing_dnskey = None
+        self.compact_denial = False
         self.deleg_enabled = False
         self.keytag = None
         self.nsec3param = None
@@ -498,6 +502,10 @@ class Zone(dns.zone.Zone):
     def set_deleg(self, deleg_enabled):
         """Set deleg_enabled flag"""
         self.deleg_enabled = deleg_enabled
+
+    def set_compact_denial(self, compact_denial):
+        """Set compact_denial of existence flag"""
+        self.compact_denial = compact_denial
 
     def set_soa_min_ttl(self):
         """Calculate SOA min TTL value"""
@@ -597,18 +605,12 @@ class Zone(dns.zone.Zone):
         return f"<Zone: {self.origin}>"
 
 
-def zone_from_file(name, zonefile, dnssec=False, key=None, deleg_enabled=False):
+def zone_from_file(name, zonefile, dnssec=False, key=None,
+                   compact_denial=False, deleg_enabled=False):
     """Obtain Zone object from zone name and file"""
 
     zone = dns.zone.from_file(zonefile, origin=name, zone_factory=Zone,
                               relativize=False)
-
-    # My custom Zone factory class converts the nodes attribute to a
-    # SortedDict (to make it easier to implement DNSSEC functions).
-    # Unfortunately dnspython 2.x undoes that conversion back to a dict.
-    # So we need to perform this hack to convert it back. This appears to
-    # be fixed in dnspython 2.5 (not released yet) via the new map_factory
-    # attribute.
     if not isinstance(zone.nodes, zone.map_factory):
         zone.nodes = zone.map_factory(zone.nodes)
 
@@ -618,6 +620,8 @@ def zone_from_file(name, zonefile, dnssec=False, key=None, deleg_enabled=False):
         zone.init_dnssec()
         if key is not None:
             zone.init_key(key)
+        if compact_denial:
+            zone.set_compact_denial(compact_denial)
     zone.set_deleg(deleg_enabled)
     return zone
 
@@ -637,10 +641,12 @@ class ZoneDict:
         """Return zone list"""
         return self.zonelist
 
-    def add(self, zonename, zonefile, dnssec=False, key=None, deleg_enabled=False):
+    def add(self, zonename, zonefile, dnssec=False, key=None,
+            compact_denial=False, deleg_enabled=False):
         """Create and add zonename->zone object"""
         zonename = dns.name.from_text(zonename)
-        self.data[zonename] = zone_from_file(zonename, zonefile, dnssec, key, deleg_enabled)
+        self.data[zonename] = zone_from_file(zonename, zonefile, dnssec, key,
+                                             compact_denial, deleg_enabled)
 
     def find(self, qname):
         """Return closest enclosing zone object for the qname"""
@@ -945,9 +951,9 @@ class DNSresponse:
 
         if zobj.online_signing():
             if zobj.nsec3param:
-                self.nxdomain_online_nsec3(zobj, sname)
+                self.nxdomain_nsec3_online(zobj, sname)
             else:
-                self.nxdomain_online_compact(zobj)
+                self.nxdomain_nsec_online_compact(zobj)
             return
 
         if zobj.dnssec:
@@ -956,7 +962,7 @@ class DNSresponse:
             else:
                 self.nxdomain_nsec3(zobj, sname)
 
-    def nxdomain_online_compact(self, zobj):
+    def nxdomain_nsec_online_compact(self, zobj):
         """
         Generate online NSEC NXDOMAIN response using Compact Denial
         """
@@ -969,7 +975,7 @@ class DNSresponse:
         nsec_rrset = make_nsec_rrset(self.qname, nextname, rrtypes, zobj.soa_min_ttl)
         self.add_rrset(zobj, self.response.authority, nsec_rrset)
 
-    def nxdomain_online_nsec3(self, zobj, sname):
+    def nxdomain_nsec3_online(self, zobj, sname):
         """
         Generate online NSEC3 NXDOMAIN response using White Lies
         """
@@ -1034,9 +1040,9 @@ class DNSresponse:
 
         if zobj.online_signing():
             if zobj.nsec3param:
-                self.nodata_online_nsec3(zobj, sname, wildcard)
+                self.nodata_nsec3_online(zobj, sname, wildcard)
             else:
-                self.nodata_online_compact(zobj, sname, wildcard)
+                self.nodata_nsec_online_compact(zobj, sname, wildcard)
             return
 
         if zobj.dnssec:
@@ -1045,7 +1051,7 @@ class DNSresponse:
             else:
                 self.nodata_nsec3(zobj, sname, wildcard=wildcard)
 
-    def nodata_online_compact(self, zobj, sname, wildcard=None):
+    def nodata_nsec_online_compact(self, zobj, sname, wildcard=None):
         """
         Generate online NSEC NODATA response
         """
@@ -1062,7 +1068,7 @@ class DNSresponse:
         nsec_rrset = make_nsec_rrset(owner, nextname, rrtypes, zobj.soa_min_ttl)
         self.add_rrset(zobj, self.response.authority, nsec_rrset)
 
-    def nodata_online_nsec3(self, zobj, sname, wildcard=None):
+    def nodata_nsec3_online(self, zobj, sname, wildcard=None):
         """
         Generate online NSEC3 NODATA response using White Lies
         """
