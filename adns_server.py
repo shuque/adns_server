@@ -951,7 +951,10 @@ class DNSresponse:
 
         if zobj.online_signing():
             if zobj.nsec3param:
-                self.nxdomain_nsec3_online(zobj, sname)
+                if zobj.compact_denial:
+                    self.nxdomain_nsec3_online_compact(zobj)
+                else:
+                    self.nxdomain_nsec3_online(zobj, sname)
             else:
                 self.nxdomain_nsec_online_compact(zobj)
             return
@@ -1005,6 +1008,21 @@ class DNSresponse:
             zobj.soa_min_ttl, covering=True)
         self.add_rrset(zobj, self.response.authority, n3_wildcard)
 
+    def nxdomain_nsec3_online_compact(self, zobj):
+        """
+        Generate online NSEC3 NXDOMAIN response using Compact Denial
+        """
+
+        if compact_answer_ok(self.query.message):
+            self.response.set_rcode(dns.rcode.NXDOMAIN)
+
+        rrtypes = [RRtype.NXNAME]
+        n3_rrset = make_nsec3_rrset_minimal(
+            zobj.nsec3param[0], zobj.origin,
+            self.qname, rrtypes,
+            zobj.soa_min_ttl, covering=False)
+        self.add_rrset(zobj, self.response.authority, n3_rrset)
+
     def nxdomain_nsec(self, zobj, sname):
         """Generate NSEC NXDOMAIN response"""
 
@@ -1040,7 +1058,10 @@ class DNSresponse:
 
         if zobj.online_signing():
             if zobj.nsec3param:
-                self.nodata_nsec3_online(zobj, sname, wildcard)
+                if zobj.compact_denial:
+                    self.nodata_nsec3_online_compact(zobj, sname, wildcard)
+                else:
+                    self.nodata_nsec3_online(zobj, sname, wildcard)
             else:
                 self.nodata_nsec_online_compact(zobj, sname, wildcard)
             return
@@ -1076,6 +1097,21 @@ class DNSresponse:
         owner = self.qname if wildcard else sname
         node = zobj.find_node(sname)
         rrtypes = [x.rdtype for x in node.rdatasets] + [dns.rdatatype.RRSIG]
+
+        n3_nodata = make_nsec3_rrset_minimal(
+            zobj.nsec3param[0], zobj.origin,
+            owner, rrtypes,
+            zobj.soa_min_ttl, covering=False)
+        self.add_rrset(zobj, self.response.authority, n3_nodata)
+
+    def nodata_nsec3_online_compact(self, zobj, sname, wildcard=None):
+        """
+        Generate online NSEC3 NODATA response using Compact Denial
+        """
+
+        owner = self.qname if wildcard else sname
+        node = zobj.find_node(sname)
+        rrtypes = [x.rdtype for x in node.rdatasets]
 
         n3_nodata = make_nsec3_rrset_minimal(
             zobj.nsec3param[0], zobj.origin,
