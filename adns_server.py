@@ -197,6 +197,7 @@ def load_zones(prefs, zonedict, zoneconfig):
                 zone.init_key(privatekey)
                 zone.compact_denial = entry.get('compact_denial', False)
         zone.deleg_enabled = entry.get('deleg_enabled', False)
+        zone.udp_truncate_all = entry.get('udp_truncate_all', False)
         zonedict.add(zonename, zone)
     zonedict.set_zonelist()
 
@@ -464,6 +465,7 @@ class Zone(dns.zone.Zone):
         'nsec3param',
         'compact_denial',
         'deleg_enabled',
+        'udp_truncate_all',
     ]
 
     def __init__(self, origin, rdclass=dns.rdataclass.IN, relativize=False):
@@ -477,6 +479,7 @@ class Zone(dns.zone.Zone):
         self.signing_dnskey = None
         self.compact_denial = False
         self.deleg_enabled = False
+        self.udp_truncate_all = False
         self.keytag = None
         self.nsec3param = None
         self.soa_min_ttl = None
@@ -850,6 +853,7 @@ class DNSresponse:
         self.edns_flags = 0
         self.edns_options = []
         self.badcookie = False
+        self.need_to_truncate = False
 
         self.response.set_rcode(dns.rcode.NOERROR)
         self.response.flags &= ~dns.flags.AA
@@ -857,6 +861,9 @@ class DNSresponse:
 
     def to_wire(self):
         """Generate wire format DNS response"""
+
+        if self.need_to_truncate:
+            return self.truncate()
 
         payload_max = self.max_size()
         try:
@@ -1457,7 +1464,10 @@ class DNSresponse:
                         "Not authoritative for queried zone")
                     self.edns_options.append(option)
             return
-        self.find_answer_in_zone(zobj, qname, qtype)
+        if not self.query.tcp and zobj.udp_truncate_all:
+            self.need_to_truncate = True
+        else:
+            self.find_answer_in_zone(zobj, qname, qtype)
 
     def dnssec_ok(self):
         """Does requestor have the DO flag set?"""
