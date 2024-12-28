@@ -177,29 +177,27 @@ def load_zones(prefs, zonedict, zoneconfig):
     """Load zones"""
 
     for entry in zoneconfig:
-        zonename = entry['name']
+        zonename = dns.name.from_text(entry['name'])
         zonefile = entry['file']
         if not zonefile.startswith('/') and prefs.workdir:
             zonefile = os.path.join(prefs.workdir, zonefile)
-        dnssec = entry.get('dnssec', False)
-        dynamic_signing = entry.get('dynamic_signing', False)
-        compact_denial = entry.get('compact_denial', False)
-        deleg_enabled = entry.get('deleg_enabled', False)
-        if dnssec and dynamic_signing:
-            privatekey_path = entry['private_key']
-            if not privatekey_path.startswith('/') and prefs.workdir:
-                privatekey_path = os.path.join(prefs.workdir, privatekey_path)
-            privatekey = load_private_key(privatekey_path)
-        else:
-            privatekey = None
         try:
-            zonedict.add(zonename, zonefile,
-                         dnssec=dnssec, key=privatekey,
-                         compact_denial=compact_denial,
-                         deleg_enabled=deleg_enabled)
+            zone = zone_from_file(zonename, zonefile)
         except dns.exception.DNSException as exc_info:
             print(f"error: load zone {zonename} failed: {exc_info}")
             sys.exit(1)
+
+        if entry.get('dnssec', False):
+            zone.init_dnssec()
+            if entry.get('dynamic_signing', False):
+                privatekey_path = entry['private_key']
+                if not privatekey_path.startswith('/') and prefs.workdir:
+                    privatekey_path = os.path.join(prefs.workdir, privatekey_path)
+                privatekey = load_private_key(privatekey_path)
+                zone.init_key(privatekey)
+                zone.compact_denial = entry.get('compact_denial', False)
+        zone.deleg_enabled = entry.get('deleg_enabled', False)
+        zonedict.add(zonename, zone)
     zonedict.set_zonelist()
 
 
@@ -465,7 +463,7 @@ class Zone(dns.zone.Zone):
         'keytag',
         'nsec3param',
         'compact_denial',
-        'deleg_enabled'
+        'deleg_enabled',
     ]
 
     def __init__(self, origin, rdclass=dns.rdataclass.IN, relativize=False):
@@ -498,14 +496,6 @@ class Zone(dns.zone.Zone):
         self.signing_dnskey = self.get_rdataset(self.origin,
                                                 dns.rdatatype.DNSKEY)[0]
         self.keytag = dns.dnssec.key_id(self.signing_dnskey)
-
-    def set_deleg(self, deleg_enabled):
-        """Set deleg_enabled flag"""
-        self.deleg_enabled = deleg_enabled
-
-    def set_compact_denial(self, compact_denial):
-        """Set compact_denial of existence flag"""
-        self.compact_denial = compact_denial
 
     def set_soa_min_ttl(self):
         """Calculate SOA min TTL value"""
@@ -605,24 +595,15 @@ class Zone(dns.zone.Zone):
         return f"<Zone: {self.origin}>"
 
 
-def zone_from_file(name, zonefile, dnssec=False, key=None,
-                   compact_denial=False, deleg_enabled=False):
+def zone_from_file(name, zonefile):
     """Obtain Zone object from zone name and file"""
 
     zone = dns.zone.from_file(zonefile, origin=name, zone_factory=Zone,
                               relativize=False)
     if not isinstance(zone.nodes, zone.map_factory):
         zone.nodes = zone.map_factory(zone.nodes)
-
     zone.add_ent_nodes()
     zone.set_soa_min_ttl()
-    if dnssec:
-        zone.init_dnssec()
-        if key is not None:
-            zone.init_key(key)
-        if compact_denial:
-            zone.set_compact_denial(compact_denial)
-    zone.set_deleg(deleg_enabled)
     return zone
 
 
@@ -641,12 +622,9 @@ class ZoneDict:
         """Return zone list"""
         return self.zonelist
 
-    def add(self, zonename, zonefile, dnssec=False, key=None,
-            compact_denial=False, deleg_enabled=False):
-        """Create and add zonename->zone object"""
-        zonename = dns.name.from_text(zonename)
-        self.data[zonename] = zone_from_file(zonename, zonefile, dnssec, key,
-                                             compact_denial, deleg_enabled)
+    def add(self, zonename, zone):
+        """Add zonename->zone object"""
+        self.data[zonename] = zone
 
     def find(self, qname):
         """Return closest enclosing zone object for the qname"""
