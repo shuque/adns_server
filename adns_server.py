@@ -173,34 +173,41 @@ def init_config(prefs, zonedict, only_zones=False):
         sys.exit(1)
 
 
-def load_zones(prefs, zonedict, zoneconfig):
-    """Load zones"""
+def load_zones(prefs, zonedict, zonesconfig):
+    """Load all zones"""
 
-    for entry in zoneconfig:
-        zonename = dns.name.from_text(entry['name'])
-        zonefile = entry['file']
-        if not zonefile.startswith('/') and prefs.workdir:
-            zonefile = os.path.join(prefs.workdir, zonefile)
-        try:
-            zone = zone_from_file(zonename, zonefile)
-        except dns.exception.DNSException as exc_info:
-            print(f"error: load zone {zonename} failed: {exc_info}")
-            sys.exit(1)
-
-        if entry.get('dnssec', False):
-            zone.init_dnssec()
-            if entry.get('dynamic_signing', False):
-                privatekey_path = entry['private_key']
-                if not privatekey_path.startswith('/') and prefs.workdir:
-                    privatekey_path = os.path.join(prefs.workdir, privatekey_path)
-                privatekey = load_private_key(privatekey_path)
-                zone.init_key(privatekey)
-                zone.compact_denial = entry.get('compact_denial', False)
-        zone.deleg_enabled = entry.get('deleg_enabled', False)
-        zone.udp_truncate_all = entry.get('udp_truncate_all', False)
-        zone.require_server_cookie = entry.get('require_server_cookie', False)
+    for config in zonesconfig:
+        zonename = dns.name.from_text(config['name'])
+        zone = make_single_zone(prefs, zonename, config)
         zonedict.add(zonename, zone)
     zonedict.set_zonelist()
+
+
+def make_single_zone(prefs, zonename, config):
+    """Read a single zone and return a Zone object"""
+
+    zonefile = config['file']
+    if not zonefile.startswith('/') and prefs.workdir:
+        zonefile = os.path.join(prefs.workdir, zonefile)
+    try:
+        zone = zone_from_file(zonename, zonefile)
+    except dns.exception.DNSException as exc_info:
+        print(f"error: load zone {zonename} failed: {exc_info}")
+        sys.exit(1)
+
+    if config.get('dnssec', False):
+        zone.init_dnssec()
+        if config.get('dynamic_signing', False):
+            privatekey_path = config['private_key']
+            if not privatekey_path.startswith('/') and prefs.workdir:
+                privatekey_path = os.path.join(prefs.workdir, privatekey_path)
+            privatekey = load_private_key(privatekey_path)
+            zone.init_key(privatekey)
+            zone.compact_denial = config.get('compact_denial', False)
+    zone.deleg_enabled = config.get('deleg_enabled', False)
+    zone.udp_truncate_all = config.get('udp_truncate_all', False)
+    zone.require_server_cookie = config.get('require_server_cookie', False)
+    return zone
 
 
 def set_server_af(prefs, address):
