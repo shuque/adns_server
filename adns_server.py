@@ -198,6 +198,7 @@ def load_zones(prefs, zonedict, zoneconfig):
                 zone.compact_denial = entry.get('compact_denial', False)
         zone.deleg_enabled = entry.get('deleg_enabled', False)
         zone.udp_truncate_all = entry.get('udp_truncate_all', False)
+        zone.require_server_cookie = entry.get('require_server_cookie', False)
         zonedict.add(zonename, zone)
     zonedict.set_zonelist()
 
@@ -466,6 +467,7 @@ class Zone(dns.zone.Zone):
         'compact_denial',
         'deleg_enabled',
         'udp_truncate_all',
+        'require_server_cookie',
     ]
 
     def __init__(self, origin, rdclass=dns.rdataclass.IN, relativize=False):
@@ -480,6 +482,7 @@ class Zone(dns.zone.Zone):
         self.compact_denial = False
         self.deleg_enabled = False
         self.udp_truncate_all = False
+        self.require_server_cookie = False
         self.keytag = None
         self.nsec3param = None
         self.soa_min_ttl = None
@@ -853,6 +856,7 @@ class DNSresponse:
         self.edns_flags = 0
         self.edns_options = []
         self.badcookie = False
+        self.server_cookie_verified = False
         self.need_to_truncate = False
 
         self.response.set_rcode(dns.rcode.NOERROR)
@@ -1466,6 +1470,8 @@ class DNSresponse:
             return
         if not self.query.tcp and zobj.udp_truncate_all:
             self.need_to_truncate = True
+        elif zobj.require_server_cookie and (not self.server_cookie_verified):
+            self.badcookie = True
         else:
             self.find_answer_in_zone(zobj, qname, qtype)
 
@@ -1552,6 +1558,7 @@ class DNSresponse:
             self.add_cookie_option(clientcookie + servercookie)
             self.badcookie = True
             return
+        self.server_cookie_verified = True
         self.add_cookie_option(returncookie)
 
     def do_edns_init(self):
@@ -1626,6 +1633,8 @@ class DNSresponse:
 
         if self.need_edns():
             self.do_edns_final()
+            if self.badcookie:
+                self.response.set_rcode(dns.rcode.BADCOOKIE)
 
         if self.response.rcode() in [dns.rcode.NOERROR, dns.rcode.NXDOMAIN]:
             if (not self.is_referral) or self.response.answer:
