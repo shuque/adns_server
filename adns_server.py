@@ -27,6 +27,7 @@ import random
 import binascii
 import yaml
 import siphash
+import cachetools
 
 import dns.zone
 import dns.name
@@ -53,6 +54,10 @@ CONFIG_DEFAULT = 'adnsconfig.yaml'
 # Parameters for online signing
 RRSIG_INCEPTION_OFFSET = 3600
 RRSIG_LIFETIME = 172800
+
+# Online Signature Cache parameters
+CACHE_SIZE = 200
+CACHE_TTL = RRSIG_LIFETIME - 2 * (RRSIG_INCEPTION_OFFSET)
 
 # Cookie parameters
 COOKIE_TIMESTAMP_DRIFT = 86400        # Allowed DNS Cookie timestamp drift (secs)
@@ -99,6 +104,7 @@ class Preferences:
     nsid = None                       # NSID option string
     minimal_any = False               # Minimal ANY (RFC 8482)
     cookie_secret = None              # Secret for DNS cookie generation
+    cache_stats = False               # Print online signature cache statistics
 
     def __str__(self):
         return "<Preferences object>"
@@ -161,6 +167,8 @@ def init_config(prefs, zonedict, only_zones=False):
                     prefs.nsid = val.encode()
                 elif key == 'minimal_any':
                     prefs.minimal_any = val
+                elif key == "cache_stats":
+                    prefs.cache_stats = val
                 else:
                     print(f"error: unrecognized config option: {key}")
                     sys.exit(1)
@@ -445,6 +453,31 @@ def load_private_key(keyfile):
     return None
 
 
+class HashableRRset:
+
+    """
+    dns.rrset.RRset is not hashable. So we define another class
+    that contains an instance of it. (Subclassing requires more
+    complicated changes to more code.). This is so that we can use
+    it as a component of a key into our online signature cache.
+    """
+
+    def __init__(self, rrset):
+        self.rrset = rrset
+
+    def __hash__(self):
+        return hash((self.rrset.name, self.rrset.rdtype))
+
+    def __eq__(self, other):
+        if isinstance(other, HashableRRset):
+            if self.rrset.name != other.rrset.name:
+                return False
+            if self.rrset.rdtype != other.rrset.rdtype:
+                return False
+            return True
+        return False
+
+
 class Zone(dns.zone.Zone):
 
     """
@@ -493,6 +526,9 @@ class Zone(dns.zone.Zone):
         self.keytag = None
         self.nsec3param = None
         self.soa_min_ttl = None
+
+    def __hash__(self):
+        return hash((self.origin, self.rdclass))
 
     def init_dnssec(self):
         """set DNSSEC parameters"""
@@ -693,8 +729,13 @@ def deleg_ok(message):
     return message.ednsflags & EdnsFlag.DELEG_OK == EdnsFlag.DELEG_OK
 
 
-def sign_rrset(zone, rrset):
+@cachetools.cached(cache=cachetools.TTLCache(maxsize=CACHE_SIZE,
+                                             ttl=CACHE_TTL),
+                   info=True,
+                   lock=threading.Lock())
+def sign_rrset(zone, h_rrset):
     """Sign RRset with zone's private key and return RRSIG record"""
+    rrset = h_rrset.rrset
     rrsig_rdata = dns.dnssec.sign(rrset,
                                   zone.privatekey,
                                   zone.origin,
@@ -915,7 +956,10 @@ class DNSresponse:
             return
 
         if zobj.online_signing():
-            section.append(sign_rrset(zobj, rrset))
+            h_rrset = HashableRRset(rrset)
+            section.append(sign_rrset(zobj, h_rrset))
+            if PREFS.cache_stats:
+                log_message(f"sigcache: {sign_rrset.cache_info()}")
             return
 
         if zobj.dnssec:
@@ -932,8 +976,8 @@ class DNSresponse:
         """Add SOA record to authority for negative responses"""
 
         soa_rrset = zobj.get_rrset(zobj.origin, dns.rdatatype.SOA)
-        soa_rrset.ttl = zobj.soa_min_ttl
         self.add_rrset(zobj, self.response.authority, soa_rrset)
+        soa_rrset.ttl = zobj.soa_min_ttl
 
     def nxdomain(self, zobj, sname):
         """Generate NXDOMAIN response"""
