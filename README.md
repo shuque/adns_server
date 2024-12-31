@@ -11,7 +11,8 @@ The server implements the DNSSEC protocol extensions. It can serve
 pre-signed master file format zones, both NSEC and NSEC3 (e.g. zones
 generated with an offline signer like BIND's dnssec-signzone). It can
 also perform online signing with a combined signing key, using the
-[Compact Denial of Existence](https://datatracker.ietf.org/doc/draft-ietf-dnsop-compact-denial-of-existence/) method, or for NSEC3 zones, with the NSEC3 White Lies method.
+[Compact Denial of Existence](https://datatracker.ietf.org/doc/draft-ietf-dnsop-compact-denial-of-existence/) method, using either NSEC or NSEC3, and can also do traditional NSEC3
+White Lies.
 
 The 'dnssec: true' parameter must be specified in the configuration file
 for signed zones. The 'dynamic_signing: true' and 'private_key: /path/to/privatekey.pem'
@@ -75,6 +76,7 @@ signals can be loaded from zone file data.
 * sortedcontainers
 * PyYAML module
 * siphash module (for DNS cookie support)
+* cachetools (for online signature cache)
 
 These can usually be installed via pip:
 ```
@@ -83,6 +85,7 @@ pip install 'dnspython>=2.3'
 pip install sortedcontainers
 pip install pyyaml
 pip install siphash
+pip install cachetools
 ```
 
 ### Usage
