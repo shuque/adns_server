@@ -37,6 +37,7 @@ import dns.rcode
 import dns.rdatatype
 import dns.rdataclass
 import dns.query
+import dns.opcode
 import dns.edns
 import dns.dnssec
 from dns.rdtypes.ANY import NSEC
@@ -868,11 +869,12 @@ class DNSquery:
     def log_query(self):
         """Log information about incoming DNS query"""
         transport = "TCP" if self.tcp else "UDP"
+        opcode = dns.opcode.to_text(self.message.opcode()).lower()
         if self.headeronly:
-            msg = (f'query: {transport} header-only '
+            msg = (f'{opcode}: {transport} header-only '
                    f'from: {self.cliaddr},{self.cliport} size={self.msg_len}')
         else:
-            msg = (f'query: {transport} '
+            msg = (f'{opcode}: {transport} '
                    f'{self.qname} '
                    f'{dns.rdatatype.to_text(self.qtype)} '
                    f'{dns.rdataclass.to_text(self.qclass)} '
@@ -1641,6 +1643,16 @@ class DNSresponse:
 
     def prepare_response(self):
         """Prepare DNS response message"""
+
+        opcode = self.query.message.opcode()
+        if opcode == dns.opcode.NOTIFY:
+            return
+        if opcode == dns.opcode.UPDATE:
+            self.response.set_rcode(dns.rcode.REFUSED)
+            return
+        if opcode != dns.opcode.QUERY:
+            self.response.set_rcode(dns.rcode.NOTIMP)
+            return
 
         if self.need_edns():
             if self.query.message.edns > 0:
