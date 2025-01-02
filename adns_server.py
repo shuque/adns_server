@@ -293,6 +293,7 @@ def handle_sighup(signum, frame):
     """handle SIGHUP - re-read configuration and zone files"""
     _, _ = signum, frame
     log_message('control: caught SIGHUP .. re-reading config and zones.')
+    sign_rrset.cache.clear()
     init_config(PREFS, ZONEDICT)
 
 
