@@ -821,6 +821,41 @@ def make_nsec3_rrset_minimal(params, zone, owner, rrtypes, ttl, covering=False):
                             ttl)
 
 
+MAX_LABEL_OCTETS = 63
+
+def predecessor_label_ideal(label):
+    """Return ideal predecessor label"""
+
+    ordinal = label[-1]
+    if ordinal == 0:
+        return label[:-1]
+    newlabel = label[:-1] + chr(ordinal-1).encode()
+    newlabel = newlabel + b'\xff' * (MAX_LABEL_OCTETS-len(label))
+    return newlabel
+
+def predecessor_label_good(label):
+    """Return good enough predecessor label"""
+
+    ordinal = label[-1]
+    if ordinal == 0:
+        return label[:-1]
+    newlabel = label[:-1] + chr(ordinal-1).encode()
+    newlabel = newlabel + b'\xff'
+    return newlabel
+
+predecessor_label = predecessor_label_good
+
+def predecessor_name(name):
+    """Return predecessor domain name"""
+
+    labels = name.labels
+    label1 = labels[0]
+    newlabel1 = predecessor_label(label1)
+    if not newlabel1:
+        return dns.name.Name(labels[1:])
+    return dns.name.Name((newlabel1,) + labels[1:])
+
+
 class DNSquery:
     """DNS query object"""
 
@@ -999,7 +1034,10 @@ class DNSresponse:
                 else:
                     self.nxdomain_nsec3_online(zobj, sname)
             else:
-                self.nxdomain_nsec_online_compact(zobj)
+                if zobj.compact_denial:
+                    self.nxdomain_nsec_online_compact(zobj)
+                else:
+                    self.nxdomain_nsec_online(zobj, sname)
             return
 
         if zobj.dnssec:
@@ -1007,6 +1045,24 @@ class DNSresponse:
                 self.nxdomain_nsec(zobj, sname)
             else:
                 self.nxdomain_nsec3(zobj, sname)
+
+    def nxdomain_nsec_online(self, zobj, sname):
+        """Generate online NSEC NXDOMAIN response"""
+
+        self.response.set_rcode(dns.rcode.NXDOMAIN)
+
+        nextname = dns.name.Name((b'\x00',) + self.qname.labels)
+        rrtypes = [dns.rdatatype.RRSIG, dns.rdatatype.NSEC]
+        # Note: computing predecessor of sname rather than qname gives wider span
+        nsec_qname = make_nsec_rrset(predecessor_name(sname), nextname,
+                                     rrtypes, zobj.soa_min_ttl)
+        self.add_rrset(zobj, self.response.authority, nsec_qname)
+
+        wildcard = dns.name.Name((b'*',) + sname.parent().labels)
+        nextname = dns.name.Name((b'\x00',) + wildcard.labels)
+        nsec_wildcard = make_nsec_rrset(predecessor_name(wildcard), nextname,
+                                        rrtypes, zobj.soa_min_ttl)
+        self.add_rrset(zobj, self.response.authority, nsec_wildcard)
 
     def nxdomain_nsec_online_compact(self, zobj):
         """
@@ -1106,7 +1162,7 @@ class DNSresponse:
                 else:
                     self.nodata_nsec3_online(zobj, sname, wildcard)
             else:
-                self.nodata_nsec_online_compact(zobj, sname, wildcard)
+                self.nodata_nsec_online(zobj, sname, wildcard)
             return
 
         if zobj.dnssec:
@@ -1115,7 +1171,7 @@ class DNSresponse:
             else:
                 self.nodata_nsec3(zobj, sname, wildcard=wildcard)
 
-    def nodata_nsec_online_compact(self, zobj, sname, wildcard=None):
+    def nodata_nsec_online(self, zobj, sname, wildcard=None):
         """
         Generate online NSEC NODATA response
         """
