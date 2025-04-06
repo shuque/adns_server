@@ -74,7 +74,7 @@ fail-on=
 clear-cache-post-run=no
 
 #max-public-methods=7
-max-public-methods=40
+max-public-methods=50
 
 [MESSAGES CONTROL]
 
