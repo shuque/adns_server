@@ -1631,7 +1631,10 @@ class DNSresponse:
                 self.edns_options.append(dns.edns.GenericOption(dns.edns.NSID,
                                                       PREFS.nsid))
             elif option.otype == dns.edns.COOKIE:
-                self.process_cookie(option.data)
+                if hasattr(option, 'data'):
+                    self.process_cookie(option.data)
+                else:
+                    self.process_cookie(option.client + option.server)
 
     def do_edns_final(self):
         """Generate final EDNS OPT RR"""
