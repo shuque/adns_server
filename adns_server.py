@@ -67,7 +67,7 @@ COOKIE_RECALCULATE_TIME = 21600
 class RRtype(enum.IntEnum):
     """Resource Record types"""
     NXNAME = 128
-    DELEG = 65287
+    DELEG = 65432
 
 class EdnsFlag(enum.IntFlag):
     """EDNS Header Flags"""
