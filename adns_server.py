@@ -1383,9 +1383,13 @@ class DNSresponse:
         node = zobj.find_node(sname)
 
         if not zobj.nsec3param:
-            nextname = dns.name.Name((b'\x00',) + sname.labels)
             rrtypes = [x.rdtype for x in node.rdatasets] + \
                 [dns.rdatatype.RRSIG, dns.rdatatype.NSEC]
+            if sname != zobj.origin and dns.rdatatype.NS in rrtypes:
+                nextname = dns.name.Name(
+                    (sname.labels[0] + b'\x00',) + sname.labels[1:])
+            else:
+                nextname = dns.name.Name((b'\x00',) + sname.labels)
             nsec_rrset = make_nsec_rrset(sname, nextname, rrtypes, zobj.soa_min_ttl)
             self.add_rrset(zobj, self.response.authority, nsec_rrset)
         else:
