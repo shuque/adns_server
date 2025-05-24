@@ -78,14 +78,18 @@ signals can be loaded from zone file data.
 * siphash module (for DNS cookie support)
 * cachetools (for online signature cache)
 
-These can usually be installed via pip:
+### Installation
+
+To install from a local copy of this repository:
+
 ```
-pip install cryptography
-pip install 'dnspython>=2.3'
-pip install sortedcontainers
-pip install pyyaml
-pip install siphash
-pip install cachetools
+pip3 install .
+```
+
+To install from the git repo directly:
+
+```
+pip3 install git+https://github.com/shuque/adns_server.git@v0.5.2
 ```
 
 ### Usage
@@ -93,7 +97,7 @@ pip install cachetools
 ```
 $ adns_server.py -h
 Reading config from: adnsconfig.yaml
-adns_server.py version 0.5.0
+adns_server.py version 0.5.2
 Usage: adns_server.py [<Options>]
 
 Options:

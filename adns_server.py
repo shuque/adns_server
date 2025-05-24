@@ -48,8 +48,9 @@ from sortedcontainers import SortedDict
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
+__version__ = '0.5.2'
+
 PROGNAME = os.path.basename(sys.argv[0])
-VERSION = '0.5.1'
 CONFIG_DEFAULT = 'adnsconfig.yaml'
 
 # Parameters for online signing
@@ -118,7 +119,7 @@ def usage(msg=None):
         print(f"ERROR: {msg}\n")
 
     print(f"""\
-{PROGNAME} version {VERSION}
+{PROGNAME} version {__version__}
 Usage: {PROGNAME} [<Options>]
 
 Options:
@@ -1787,7 +1788,7 @@ def setup_server():
     if PREFS.daemon:
         daemon(dirname=PREFS.workdir)
     install_signal_handlers()
-    log_message(f"info: {PROGNAME} version {VERSION}: running")
+    log_message(f"info: {PROGNAME} version {__version__}: running")
 
     try:
         fd_read, dispatch = setup_sockets(PREFS.server_af,
