@@ -48,7 +48,7 @@ from sortedcontainers import SortedDict
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
-__version__ = '0.5.2'
+__version__ = '0.6.0'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'
@@ -68,7 +68,11 @@ COOKIE_RECALCULATE_TIME = 21600
 class RRtype(enum.IntEnum):
     """Resource Record types"""
     NXNAME = 128
-    DELEG = 65432
+    DELEG = 61440
+    DELEGI = 65433
+
+## RR types that are authoritative in the parent zone
+AUTH_IN_PARENT_RRTYPES = [dns.rdatatype.DS, RRtype.DELEG]
 
 class EdnsFlag(enum.IntFlag):
     """EDNS Header Flags"""
@@ -1277,59 +1281,43 @@ class DNSresponse:
         """Generate referral response to child zone"""
 
         self.is_referral = True
-        if zobj.deleg_enabled:
+        if zobj.deleg_enabled and deleg_ok(self.query.message):
             self.do_referral_deleg(zobj, sname, rdataset)
             return
+
+        self.do_referral_traditional(zobj, sname, rdataset)
+
+    def do_referral_traditional(self, zobj, sname, rdataset):
+        """Generate traditional referral response (NS + glue + DS/NSEC)"""
 
         ns_rrset = dns.rrset.RRset(sname, dns.rdataclass.IN, dns.rdatatype.NS)
         ns_rrset.update(rdataset)
         self.add_rrset(zobj, self.response.authority, ns_rrset, authoritative=False)
         self.get_glue(zobj, sname, rdataset)
 
-        if zobj.dnssec:
+        if zobj.dnssec and self.dnssec_ok():
             ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
             if ds_rrset:
                 self.add_rrset(zobj, self.response.authority, ds_rrset)
             else:
                 # Insecure referral - add NSEC record matching delegation name
                 self.add_nsec_matching(zobj, sname)
+            ### TODO: when do we add NSEC to disprove DELEG???
 
     def do_referral_deleg(self, zobj, sname, rdataset):
         """Generate DELEG enabled referral response to child zone"""
 
         deleg_rrset = zobj.get_rrset(sname, RRtype.DELEG)
-        if deleg_rrset and deleg_ok(self.query.message):
+        if deleg_rrset:
             self.add_rrset(zobj, self.response.authority, deleg_rrset)
             # If we decide to always add NSEC, uncomment this
             #if (zobj.dnssec and self.dnssec_ok()):
             #    self.add_nsec_matching(zobj, sname)
             return
-
-        self.is_referral = True
-        ns_rrset = dns.rrset.RRset(sname, dns.rdataclass.IN, dns.rdatatype.NS)
-        ns_rrset.update(rdataset)
-        self.add_rrset(zobj, self.response.authority, ns_rrset, authoritative=False)
-        self.get_glue(zobj, sname, rdataset)
-
-        # For unsigned zones or DO=0 queries, return DELEG (if present) and return
-        if not (zobj.dnssec and self.dnssec_ok()):
-            if deleg_rrset:
-                self.add_rrset(zobj, self.response.authority, deleg_rrset)
-            return
-
-        ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
-        if ds_rrset:
-            self.add_rrset(zobj, self.response.authority, ds_rrset)
-
-        if deleg_rrset:
-            self.add_rrset(zobj, self.response.authority, deleg_rrset)
-
-        if not (ds_rrset and deleg_rrset):
-            # Insecure referral or only one of {DS,DELEG}. Add NSEC matching sname
-            self.add_nsec_matching(zobj, sname)
+        self.do_referral_traditional(zobj, sname, rdataset)
 
     def do_referral_deleg_only(self, zobj, sname, deleg_rrset):
-        """Do DELEG-only referral - future looking"""
+        """TODO: Remove this function. Do DELEG-only referral"""
 
         self.is_referral = True
         self.add_rrset(zobj, self.response.authority, deleg_rrset)
@@ -1479,13 +1467,13 @@ class DNSresponse:
         if sname != zobj.origin:
             rdataset = zobj.get_rdataset(sname, dns.rdatatype.NS)
             if rdataset:
-                if (qname != sname) or (stype not in [dns.rdatatype.DS, RRtype.DELEG]):
+                if (qname != sname) or (stype not in AUTH_IN_PARENT_RRTYPES):
                     self.do_referral(zobj, sname, rdataset)
                     return Finished.TRUE
             if zobj.deleg_enabled and deleg_ok(self.query.message):
                 deleg_rrset = zobj.get_rrset(sname, RRtype.DELEG)
                 if deleg_rrset:
-                    if (qname != sname) or (stype not in [dns.rdatatype.DS, RRtype.DELEG]):
+                    if (qname != sname) or (stype not in AUTH_IN_PARENT_RRTYPES):
                         self.do_referral_deleg_only(zobj, sname, deleg_rrset)
                         return Finished.TRUE
 
