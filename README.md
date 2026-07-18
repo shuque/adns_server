@@ -74,7 +74,7 @@ pip3 install .
 To install from the git repo directly:
 
 ```
-pip3 install git+https://github.com/shuque/adns_server.git@v0.5.2
+pip3 install git+https://github.com/shuque/adns_server.git@v0.7.0
 ```
 
 ### Usage
@@ -82,7 +82,7 @@ pip3 install git+https://github.com/shuque/adns_server.git@v0.5.2
 ```
 $ adns_server.py -h
 Reading config from: adnsconfig.yaml
-adns_server.py version 0.5.2
+adns_server.py version 0.7.0
 Usage: adns_server.py [<Options>]
 
 Options:
@@ -138,7 +138,7 @@ zones:
 
 ### Key Generation for Online Signing
 
-This repo also includes a small script, genkey.pl, to help generate
+This repo also includes a small script, genkey.py, to help generate
 DNSSEC keys used for online signing configurations.
 
 ```
