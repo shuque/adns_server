@@ -20,52 +20,37 @@ options are needed for online signing.
 
 ## DELEG Support
 
-The server can support delivery of the
-[experimental DELEG record](https://github.com/fl1ger/deleg) in referral
-responses, using the private RR type, 65287. DELEG is a newly proposed
-mechanism to support extensible delegation capabilities in the DNS, and
-is planned to (eventually) replace both the DS and parent-side NS records.
-A per zone configuration flag "deleg_enabled" needs to be set to true to use
-this feature.
+The server implements the authoritative-server behavior for DELEG, a newly
+proposed mechanism for extensible delegation capabilities in the DNS. The
+implementation follows
+[draft-ietf-deleg-10](https://datatracker.ietf.org/doc/draft-ietf-deleg/) and
+[draft-ietf-dnsop-delext-08](https://datatracker.ietf.org/doc/draft-ietf-dnsop-delext/).
+DELEG is modeled on the DS record: a DELEG record appears in the parent zone at
+the delegation point, is authoritative in the parent, and creates a zone cut.
+It uses the (pre-standardization) RR type code 61440 (`TYPE61440`); the
+associated DELEGPARAM indirection type uses code 65433.
 
-For signed zones, it can currently only be used with the online signing modes.
-This is because most tools that generate pre-signed zones won't be able to
-deal with a gratuitous "DELEG" record contained in the input. If they accept it,
-they will likely treat it as non-authoritative "glue" and not sign it. And a
-traditional authoritative server will need additional logic to return it in a
-referral response. This program will recognize the DELEG record and will place
-it in the referral of the corresponding delegation along with a dynamically
-generated signature. (In the future, I may write my own modified zone signer,
-after which the program could also serve pre-signed zones with DELEG).
+A per-zone configuration flag `deleg_enabled: true` is required to enable DELEG
+handling for a zone. DELEG-aware resolvers negotiate the feature with the
+EDNS(0) DE (Delegation Extensions) flag; the server tailors its referral and
+occlusion behavior to whether that flag is set. DELEG is supported in both
+signed and unsigned zones, and in referrals to signed or unsigned child zones.
 
-This program also supports returning DELEG from unsigned zones, as well as
-DELEG referrals to subzones that aren't signed. The rules for processing
-such referrals on the resolver side need to be very carefully spelled out
-in the specification to avoid security problems. For example, if a secure
-transport capability (e.g. DOT, DOH, DOQ) for a delegated zone needs to be
-obtained without DNSSEC, then an alternate means of authenticating the
-channel to the server needs to be used (e.g. the delegating parent zone would
-need to have pre-configured DNS over TLS/DoH/QUIC and require Internet PKI
-authentication of its server certificates).
+For signed zones, DELEG can currently only be used with the online signing
+modes. This is because most tools that generate pre-signed zones do not
+understand that DELEG is a delegation type that must be signed at the parent's
+delegation point (they treat it as non-authoritative glue and do not sign it,
+or mis-generate the delegation-point NSEC/NSEC3 bitmaps). This program
+recognizes the DELEG record, places it in the referral for the corresponding
+delegation, and generates the signature dynamically. (A future DELEG-aware
+zone signer would let the program also serve pre-signed zones with DELEG.)
 
-DELEG supports off-path authentication of a child zone's secure entry point
-DNSKEY(s). For this mode of operation, it would be prudent for a validating
-resolver to require DNSSEC in the parent zone. Otherwise it would involve
-either leap of faith authentication, or authenticating the transport channel
-to the delegating server in some way, e.g. with the Internet PKI, which would
-allow any Public CA to compromise DNSSEC authentication.
-
-While the protocol details are still being developed, here is a quick summary
-of the behavior as currently implemented in this program for signed zones: the
-DELEG record is a delegation record that appears in the parent zone, whose
-owner name matches the name of the delegated zone, similar to DS, and like the
-DS record, it is authoritative in the parent. When a delegation contains both
-a DS and DELEG record set, then both are returned in the referral response with
-their signatures. When only one of them is present, it is returned along with
-the NSEC or NSEC3 record set matching the delegated name (to prove that the other
-doesn't exist). Confirming the existence of DELEG capabilities will likely also
-need a secure signal via a new DS digest type, or a new DNSKEY flag. Those
-signals can be loaded from zone file data.
+For the full details of the implementation — type codes and EDNS signaling, the
+DE=1 and DE=0 referral/occlusion behavior, the DNSSEC proofs used, the relevant
+functions in the code, and the one area (Compact Denial of Existence
+interaction) where the implementation makes a choice not yet settled by the
+drafts — see **[DELEG.md](DELEG.md)**, which is the authoritative description of
+DELEG support in this program.
 
 
 ### Pre-requisites
