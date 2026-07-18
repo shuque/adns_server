@@ -1,0 +1,13 @@
+0release.txt
+0testing.txt
+0todo.txt
+bugs
+output
+private
+public
+zones
+__pycache__
+adns_server.egg-info/
+build/
+scratch/
+tests/
