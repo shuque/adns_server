@@ -48,7 +48,7 @@ from sortedcontainers import SortedDict
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
-__version__ = '0.6.0'
+__version__ = '0.7.0'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'
@@ -69,7 +69,7 @@ class RRtype(enum.IntEnum):
     """Resource Record types"""
     NXNAME = 128
     DELEG = 61440
-    DELEGI = 65433
+    DELEGPARAM = 65433
 
 ## RR types that are authoritative in the parent zone
 AUTH_IN_PARENT_RRTYPES = [dns.rdatatype.DS, RRtype.DELEG]
@@ -78,11 +78,13 @@ class EdnsFlag(enum.IntFlag):
     """EDNS Header Flags"""
     DNSSEC_OK = 0x8000
     COMPACT_OK = 0x4000
-    DELEG_OK = 0x2000
+    DELEG_EXT_OK = 0x2000             # EDNS(0) DE flag (delext-08 5.1, bit 2)
 
 class EDECode(enum.IntEnum):
     """Extended DNS Error Codes"""
     INVALID_QTYPE = 30
+    # Provisional value; IANA-TBD (deleg-10 5.2.2.1, INFO-CODE TBD3)
+    NEW_DELEGATION_ONLY = 31
 
 class Finished(enum.Flag):
     """Finished Boolean enum"""
@@ -731,9 +733,9 @@ def compact_answer_ok(message):
     return message.ednsflags & EdnsFlag.COMPACT_OK == EdnsFlag.COMPACT_OK
 
 
-def deleg_ok(message):
-    """Does DNS message have DELEG OK EDNS header flag set"""
-    return message.ednsflags & EdnsFlag.DELEG_OK == EdnsFlag.DELEG_OK
+def deleg_ext_ok(message):
+    """Does DNS message have the EDNS(0) DE (Delegation Extensions) flag set?"""
+    return message.ednsflags & EdnsFlag.DELEG_EXT_OK == EdnsFlag.DELEG_EXT_OK
 
 
 @cachetools.cached(cache=cachetools.TTLCache(maxsize=CACHE_SIZE,
@@ -1281,8 +1283,8 @@ class DNSresponse:
         """Generate referral response to child zone"""
 
         self.is_referral = True
-        if zobj.deleg_enabled and deleg_ok(self.query.message):
-            self.do_referral_deleg(zobj, sname, rdataset)
+        if zobj.deleg_enabled and deleg_ext_ok(self.query.message):
+            self.do_referral_deleg(zobj, sname)
             return
 
         self.do_referral_traditional(zobj, sname, rdataset)
@@ -1302,41 +1304,35 @@ class DNSresponse:
             else:
                 # Insecure referral - add NSEC record matching delegation name
                 self.add_nsec_matching(zobj, sname)
-            ### TODO: when do we add NSEC to disprove DELEG???
 
-    def do_referral_deleg(self, zobj, sname, rdataset):
-        """Generate DELEG enabled referral response to child zone"""
+    def do_referral_deleg(self, zobj, sname):
+        """
+        Generate DELEG-aware referral response (DE=1) to child zone.
+
+        deleg-10 5.2.1: if the delegation has a DELEG RRset, it goes into
+        the Authority section and the NS RRset MUST NOT be included; DS is
+        included when present, otherwise NSEC/NSEC3 proves DS absence. If
+        there is no DELEG RRset, this is a legacy NS referral, but the
+        absence of the DELEG RRset MUST additionally be proven (5.2.1.3).
+        """
 
         deleg_rrset = zobj.get_rrset(sname, RRtype.DELEG)
         if deleg_rrset:
             self.add_rrset(zobj, self.response.authority, deleg_rrset)
-            # If we decide to always add NSEC, uncomment this
-            #if (zobj.dnssec and self.dnssec_ok()):
-            #    self.add_nsec_matching(zobj, sname)
+            if zobj.dnssec and self.dnssec_ok():
+                ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
+                if ds_rrset:
+                    self.add_rrset(zobj, self.response.authority, ds_rrset)
+                else:
+                    # Insecure delegation: prove DS absence.
+                    self.add_nsec_matching(zobj, sname)
             return
-        self.do_referral_traditional(zobj, sname, rdataset)
 
-    def do_referral_deleg_only(self, zobj, sname, deleg_rrset):
-        """TODO: Remove this function. Do DELEG-only referral"""
-
-        self.is_referral = True
-        self.add_rrset(zobj, self.response.authority, deleg_rrset)
-
-        # if DS exists, return it too (may have DS shim signal)
-        ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
-        if ds_rrset:
-            self.add_rrset(zobj, self.response.authority, ds_rrset)
-
-        if zobj.online_signing():
-            self.add_nsec_online(zobj, sname)
-        elif zobj.nsec3param is None:
-            n1_rrset = zobj.nsec_matching(sname)
-            if n1_rrset:
-                self.add_rrset(zobj, self.response.authority, n1_rrset)
-        else:
-            n3_rrset = zobj.nsec3_matching(sname)
-            if n3_rrset:
-                self.add_rrset(zobj, self.response.authority, n3_rrset)
+        # No DELEG RRset: legacy NS referral, plus proof of DELEG absence.
+        ns_rdataset = zobj.get_rdataset(sname, dns.rdatatype.NS)
+        self.do_referral_traditional(zobj, sname, ns_rdataset)
+        if zobj.dnssec and self.dnssec_ok():
+            self.add_nsec_matching(zobj, sname)
 
     def get_glue(self, zobj, sname, rdataset):
         """Add glue records if needed"""
@@ -1374,7 +1370,8 @@ class DNSresponse:
         if not zobj.nsec3param:
             rrtypes = [x.rdtype for x in node.rdatasets] + \
                 [dns.rdatatype.RRSIG, dns.rdatatype.NSEC]
-            if sname != zobj.origin and dns.rdatatype.NS in rrtypes:
+            if sname != zobj.origin and \
+                    (dns.rdatatype.NS in rrtypes or RRtype.DELEG in rrtypes):
                 nextname = dns.name.Name(
                     (sname.labels[0] + b'\x00',) + sname.labels[1:])
             else:
@@ -1388,6 +1385,77 @@ class DNSresponse:
                 sname, rrtypes,
                 zobj.soa_min_ttl, covering=False)
             self.add_rrset(zobj, self.response.authority, nsec3_rrset)
+
+    def add_new_delegation_only_ede(self):
+        """
+        Add "New Delegation Only" Extended DNS Error (deleg-10 5.2.2.1) to a
+        DE=0 response for a name at or below a DELEG-only delegation cut.
+        """
+        if self.query.message.edns == -1:
+            return
+        self.edns_options.append(
+            dns.edns.EDEOption(EDECode.NEW_DELEGATION_ONLY,
+                               "New Delegation Only"))
+
+    @staticmethod
+    def next_closer_name(qname, cut):
+        """Return the name one label below the closest encloser (cut)."""
+        extra = len(qname.labels) - len(cut.labels)
+        return dns.name.Name((qname.labels[extra - 1],) + cut.labels)
+
+    def occluded_nxdomain(self, zobj, qname, cut):
+        """
+        Generate authoritative NXDOMAIN for a DE=0 query below a DELEG-only
+        cut (deleg-10 5.2.2.1). The child zone is invisible to a DELEG-unaware
+        client. The nonexistence proof deliberately keeps the DELEG bit visible
+        (matching NSEC / closest-encloser NSEC3) rather than using a Compact
+        Denial black lie -- see DELEG.md.
+        """
+        self.response.set_rcode(dns.rcode.NXDOMAIN)
+        self.add_soa(zobj)
+        if not self.dnssec_ok():
+            return
+        if not zobj.nsec3param:
+            # NSEC: the cut's NSEC uses the special covering next-name form
+            # (cut -> cut\000), which covers all names below the cut.
+            self.add_nsec_matching(zobj, cut)
+        else:
+            self.occluded_nxdomain_nsec3(zobj, qname, cut)
+
+    def occluded_nxdomain_nsec3(self, zobj, qname, cut):
+        """NSEC3 closest-encloser proof for a DELEG-only occlusion NXDOMAIN"""
+
+        next_closer = self.next_closer_name(qname, cut)
+        wildcard = dns.name.Name((b'*',) + cut.labels)
+
+        if zobj.online_signing():
+            params = zobj.nsec3param[0]
+            node = zobj.find_node(cut)
+            ce_rrtypes = [x.rdtype for x in node.rdatasets] + \
+                [dns.rdatatype.RRSIG]
+            n3_ce = make_nsec3_rrset_minimal(
+                params, zobj.origin, cut, ce_rrtypes,
+                zobj.soa_min_ttl, covering=False)
+            self.add_rrset(zobj, self.response.authority, n3_ce)
+            n3_next = make_nsec3_rrset_minimal(
+                params, zobj.origin, next_closer, [],
+                zobj.soa_min_ttl, covering=True)
+            self.add_rrset(zobj, self.response.authority, n3_next)
+            n3_wild = make_nsec3_rrset_minimal(
+                params, zobj.origin, wildcard, [],
+                zobj.soa_min_ttl, covering=True)
+            self.add_rrset(zobj, self.response.authority, n3_wild)
+            return
+
+        n3_ce = zobj.nsec3_matching(cut)
+        if n3_ce:
+            self.add_rrset(zobj, self.response.authority, n3_ce)
+        n3_next = zobj.nsec3_covering(next_closer)
+        if n3_next:
+            self.add_rrset(zobj, self.response.authority, n3_next)
+        n3_wild = zobj.nsec3_covering(wildcard)
+        if n3_wild:
+            self.add_rrset(zobj, self.response.authority, n3_wild)
 
     def process_cname(self, zobj, rrname, sname, stype, cname_rdataset,
                       wildcard=None):
@@ -1463,19 +1531,33 @@ class DNSresponse:
             self.process_dname(zobj, qname, sname, stype, dname_rdataset)
             return Finished.TRUE
 
-        # Look for delegation
+        # Look for delegation. A delegation point has an NS RRset and/or,
+        # for DELEG-enabled zones, a DELEG RRset. A DELEG-aware client (DE=1)
+        # gets a DELEG-aware referral; a DELEG-unaware client (DE=0) is served
+        # per non-DELEG specifications, i.e. NS occludes DELEG, and a
+        # DELEG-only cut (no NS) is an invisible/occluded namespace.
         if sname != zobj.origin:
-            rdataset = zobj.get_rdataset(sname, dns.rdatatype.NS)
-            if rdataset:
-                if (qname != sname) or (stype not in AUTH_IN_PARENT_RRTYPES):
-                    self.do_referral(zobj, sname, rdataset)
+            ns_rdataset = zobj.get_rdataset(sname, dns.rdatatype.NS)
+            deleg_rrset = (zobj.get_rrset(sname, RRtype.DELEG)
+                           if zobj.deleg_enabled else None)
+            de_aware = zobj.deleg_enabled and deleg_ext_ok(self.query.message)
+            is_cut = bool(ns_rdataset) or bool(deleg_rrset)
+            if is_cut and ((qname != sname) or
+                           (stype not in AUTH_IN_PARENT_RRTYPES)):
+                if de_aware:
+                    self.do_referral(zobj, sname, ns_rdataset)
                     return Finished.TRUE
-            if zobj.deleg_enabled and deleg_ok(self.query.message):
-                deleg_rrset = zobj.get_rrset(sname, RRtype.DELEG)
-                if deleg_rrset:
-                    if (qname != sname) or (stype not in AUTH_IN_PARENT_RRTYPES):
-                        self.do_referral_deleg_only(zobj, sname, deleg_rrset)
-                        return Finished.TRUE
+                if ns_rdataset:
+                    # DE=0 with NS present: NS occludes DELEG -> legacy referral
+                    self.do_referral(zobj, sname, ns_rdataset)
+                    return Finished.TRUE
+                # DE=0, DELEG-only cut: namespace is invisible to this client
+                self.add_new_delegation_only_ede()
+                if qname != sname:
+                    self.occluded_nxdomain(zobj, qname, sname)
+                    return Finished.TRUE
+                # qname == sname: fall through to answer DELEG/DS as ordinary
+                # data or return NODATA (deleg-10 5.2.2.1 / 5.2.2.2).
 
         if sname == qname:
             self.find_rrtype(zobj, sname, stype)
@@ -1616,8 +1698,8 @@ class DNSresponse:
             if compact_answer_ok(self.query.message):
                 self.edns_flags |= EdnsFlag.COMPACT_OK
 
-        if deleg_ok(self.query.message):
-            self.edns_flags |= EdnsFlag.DELEG_OK
+        if deleg_ext_ok(self.query.message):
+            self.edns_flags |= EdnsFlag.DELEG_EXT_OK
 
         for option in self.query.message.options:
             if PREFS.nsid and (option.otype == dns.edns.NSID):
