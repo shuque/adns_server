@@ -48,7 +48,7 @@ from sortedcontainers import SortedDict
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
-__version__ = '0.7.0'
+__version__ = '0.7.1'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'
@@ -903,7 +903,15 @@ class DNSresponse:
                                                   our_payload=PREFS.edns_udp_adv)
 
         if not self.query.headeronly:
-            self.qname = query.message.question[0].name
+            # Canonicalize (downcase) the query name for all internal
+            # processing and answer construction. This keeps synthesized
+            # owner names and, crucially, NSEC RDATA next-names (which are
+            # NOT downcased during DNSSEC canonicalization, per RFC 6840
+            # section 5.1) in canonical case, so that online signatures
+            # match regardless of DNS 0x20 case randomization in the query.
+            # The echoed question section retains the original case, since
+            # make_response() copied it from the original query message.
+            self.qname = query.message.question[0].name.canonicalize()
             self.qtype = query.message.question[0].rdtype
             self.qclass = query.message.question[0].rdclass
 
