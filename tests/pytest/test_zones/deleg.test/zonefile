@@ -1,0 +1,48 @@
+$TTL 86400
+$ORIGIN deleg.test.
+@		IN	SOA	ns.deleg.test. hostmaster.deleg.test. (
+				1          ; Serial
+				43200      ; Refresh
+				3600       ; Retry
+				3628800    ; Expire
+				3600 )     ; Minimum
+		IN	NS	ns.deleg.test.
+$INCLUDE deleg.test/dnskey.txt
+;;
+;; Apex nameserver and a few ordinary names for positive / negative tests.
+;;
+ns		IN	A	192.0.2.1
+www		IN	A	192.0.2.10
+www		IN	AAAA	2001:db8::10
+;;
+;; Wildcard, and an explicit name parallel to it.
+;;
+*.wild		IN	A	192.0.2.20
+exact.wild	IN	A	192.0.2.21
+;;
+;; deep.ent is below an empty non-terminal (ent has no records of its own).
+;;
+host.deep.ent	IN	A	192.0.2.30
+;;
+;; Delegation matrix. DELEG rdata is opaque to the server (returned as-is);
+;; the shapes below exercise every referral / occlusion code path.
+;;
+;; sub1: NS + DS + DELEG  (secure delegation, single DELEG record)
+sub1		IN	NS	a.ns.example.
+sub1		IN	DS	40524 13 2 0000000000000000000000000000000000000000000000000000000000000001
+sub1		IN	TYPE61440 \# 22 000104646e733103703034056e736f6e65036e657400
+;;
+;; sub2: NS + DS, no DELEG  (secure NS-only delegation)
+sub2		IN	NS	a.ns.example.
+sub2		IN	DS	40524 13 2 0000000000000000000000000000000000000000000000000000000000000002
+;;
+;; sub3: NS + DELEG, no DS  (insecure delegation, 2-record DELEG RRset)
+sub3		IN	NS	a.ns.example.
+sub3		IN	TYPE61440 \# 22 000104646e733103703034056e736f6e65036e657400
+sub3		IN	TYPE61440 \# 22 000104646e733203703034056e736f6e65036e657400
+;;
+;; sub5: DELEG only, no NS, no DS  (DELEG-only cut / invisible to DE=0)
+sub5		IN	TYPE61440 \# 26 00000a636f6e66696731323334076578616d706c6503636f6d00
+;;
+;; sub7: NS only, no DELEG, no DS  (legacy insecure delegation)
+sub7		IN	NS	a.ns.example.

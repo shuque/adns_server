@@ -1,0 +1,20 @@
+$TTL 86400
+$ORIGIN unsigned.test.
+@		IN	SOA	ns.unsigned.test. hostmaster.unsigned.test. (
+				1          ; Serial
+				43200      ; Refresh
+				3600       ; Retry
+				3628800    ; Expire
+				3600 )     ; Minimum
+		IN	NS	ns.unsigned.test.
+ns		IN	A	192.0.2.1
+www		IN	A	192.0.2.10
+;;
+;; NS delegation with in-domain glue.
+;;
+sub1		IN	NS	ns1.sub1.unsigned.test.
+ns1.sub1	IN	A	192.0.2.53
+;;
+;; DELEG-only cut (no NS) in an unsigned zone.
+;;
+sub5		IN	TYPE61440 \# 26 00000a636f6e66696731323334076578616d706c6503636f6d00

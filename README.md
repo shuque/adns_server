@@ -176,3 +176,36 @@ example.com. 7200 IN DNSKEY 257 3 13 oBQvOkuVPdp7Wes6EcWra7UlyI3u9EeM nRd79CSmq4
 ### DS record
 56959 13 2 ac2c59edcb0d9021d6898e2824cd63fd67c3d8c0b6da69943121b5b5263bdbad
 ```
+
+## Testing
+
+An automated test suite lives under `tests/pytest/`. It launches a private
+instance of the server on an ephemeral loopback port, drives it with real DNS
+queries via dnspython, and asserts on the semantics of the responses (RCODE,
+flags, sections, Extended DNS Errors). For signed zones it also
+cryptographically validates the DNSSEC signatures and NSEC/NSEC3 proofs, rather
+than diffing volatile response text.
+
+The suite is self-contained: it manages the server process and uses its own
+purpose-built zones under `tests/pytest/test_zones/` (online signed at runtime),
+so no manual setup or pre-signed data is required.
+
+To install the test dependency (pytest) and run the suite:
+
+```
+pip3 install -e '.[test]'
+pytest
+```
+
+Or run it directly without installing the extra:
+
+```
+python3 -m pytest tests/pytest -v
+```
+
+Set `ADNS_TEST_KEEP_LOG=1` to print the server log on teardown when debugging a
+startup failure. See `tests/pytest/README.md` for details on the fixtures,
+assertion helpers, and test zones.
+
+The older `tests/dotests-*.sh` scripts remain for ad-hoc manual inspection of
+raw `dig` output.

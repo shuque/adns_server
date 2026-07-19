@@ -26,6 +26,11 @@ dependencies = [
     "cachetools",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/shuque/check_zone_dnssec"
 Issues = "https://github.com/shuque/check_zone_dnssec/issues"
@@ -36,3 +41,6 @@ script-files = ['adns_server.py']
 
 [tool.setuptools.dynamic]
 version = {attr = "adns_server.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests/pytest"]

@@ -1,0 +1,2 @@
+; flags=257 keytag=38565
+nsec3.test. IN DNSKEY 257 3 13 A7Jd7dcolPD/i3uCqwG9A5kUFUR4kfFA qk07G2mJHcnrPYCjU5sjyhWY5eE5U2Td yx9cZeM8ORgK4ShAo7TFQg==

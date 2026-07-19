@@ -1,0 +1,32 @@
+# Configuration for the automated pytest suite.
+# The suite launches the server with its working directory set to this
+# directory (tests/pytest/test_zones/), so the file/private_key paths below
+# are relative to it. Online signing is used throughout so signatures are
+# generated at runtime and cryptographically validated by the suite; no
+# pre-signed data needs to be checked in.
+config:
+  edns: 1432
+  minimal_any: false
+zones:
+  # NSEC, online signing, compact denial, DELEG enabled (DNSKEY-ADT set).
+  - name: "deleg.test"
+    file: "deleg.test/zonefile"
+    dnssec: true
+    dynamic_signing: true
+    compact_denial: true
+    private_key: "deleg.test/privkey.pem"
+    deleg_enabled: true
+
+  # NSEC3, online signing, DELEG enabled.
+  - name: "nsec3.test"
+    file: "nsec3.test/zonefile"
+    dnssec: true
+    dynamic_signing: true
+    private_key: "nsec3.test/privkey.pem"
+    deleg_enabled: true
+
+  # Unsigned zone, DELEG enabled.
+  - name: "unsigned.test"
+    file: "unsigned.test/zonefile"
+    dnssec: false
+    deleg_enabled: true
