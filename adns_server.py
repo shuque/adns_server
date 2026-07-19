@@ -48,7 +48,7 @@ from sortedcontainers import SortedDict
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
-__version__ = '0.7.1'
+__version__ = '0.7.2'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'
@@ -469,19 +469,30 @@ class HashableRRset:
     that contains an instance of it. (Subclassing requires more
     complicated changes to more code.). This is so that we can use
     it as a component of a key into our online signature cache.
+
+    The key includes the RRset's RDATA, not just its name and type.
+    Synthesized records (e.g. NSEC with a computed next-name, or minimal
+    NSEC3) can share an owner name and type while carrying different RDATA
+    across different responses; keying on RDATA too prevents returning a
+    signature computed over one variant for a differing one.
     """
 
     def __init__(self, rrset):
         self.rrset = rrset
+        # Canonical, order-independent representation of the RDATA.
+        self._rdata_key = frozenset(
+            rdata.to_digestable(rrset.name) for rdata in rrset)
 
     def __hash__(self):
-        return hash((self.rrset.name, self.rrset.rdtype))
+        return hash((self.rrset.name, self.rrset.rdtype, self._rdata_key))
 
     def __eq__(self, other):
         if isinstance(other, HashableRRset):
             if self.rrset.name != other.rrset.name:
                 return False
             if self.rrset.rdtype != other.rrset.rdtype:
+                return False
+            if self._rdata_key != other._rdata_key:
                 return False
             return True
         return False
