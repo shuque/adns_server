@@ -78,6 +78,49 @@ Because the DE=0 occlusion path uses NODATA / NXDOMAIN (never a referral), the
 Authoritative Answer (AA) bit is set — the parent is authoritative for these
 answers.
 
+## Signing, the DNSKEY-ADT flag, and downgrade resistance
+
+A point that is easy to get wrong: serving DELEG and offering *downgrade
+resistance* for DELEG are two independent things. This server acts as a DELEG
+authority whenever a zone has `deleg_enabled: true` and carries DELEG records;
+it does **not** require the zone to be signed, and it does **not** require (or
+even inspect) the DNSKEY-ADT flag. The DNSKEY-ADT flag is a signal *for
+validating resolvers* (delext 6.1/6.2 — "indicates to a validator that a
+referral MUST contain an NSEC or NSEC3 record..."), not a precondition for the
+authoritative server's behavior. The server simply serves whatever DNSKEY flags
+are present in the zone data.
+
+What the drafts require and permit:
+
+- delext 6: "In a **DNSSEC-signed** zone, Delegation Type RRsets MUST be
+  signed." The "in a signed zone" qualifier means an *unsigned* zone may serve
+  DELEG; there is simply nothing to sign.
+- delext 5.1: "Delegation Types are an opt-in extension." There is no blanket
+  requirement that a delegating zone be signed.
+- delext 8.3: for a forged/injected DELEG, "This attack is mitigated by
+  DNSSEC... In unsigned zones, no cryptographic protection against this attack
+  is available."
+- delext 8.2.1/8.2.2: the DELEG-strip (fall back to unsigned NS) and DE-flag
+  strip downgrade attacks are only detectable when the DNSKEY-ADT flag is set,
+  the zone is signed, and the resolver validates and enforces ADT.
+
+Consequently a DELEG-enabled zone served by this program can operate in one of
+three modes, and only the third is fully downgrade-resistant:
+
+| Mode | Zone state | DELEG served | Downgrade resistance |
+|------|-----------|:---:|------|
+| 1 | Unsigned (no DNSKEY) | yes, unsigned | None. A forger can strip the DELEG and substitute NS, or inject a fabricated DELEG, undetectably (delext 8.3). |
+| 2 | Signed, DNSKEY-ADT **not** set | yes, with RRSIGs | Partial. A validator rejects *forged or unsigned* DELEG RRsets, but a DELEG-strip → NS-fallback or a DE-flag strip is **not** detected, because those mitigations require ADT (delext 8.2). |
+| 3 | Signed, DNSKEY-ADT set (flags 259 = ZONE+ADT+SEP) | yes, with RRSIGs | Full. An ADT-aware validator MUST see NSEC/NSEC3 proof of DELEG presence/absence in every referral, defeating the strip attacks. |
+
+This program supports all three modes with no code difference — the mode is
+determined entirely by the zone's signing configuration and DNSKEY flags. To
+publish a fully downgrade-resistant DELEG zone, sign it (online or offline) and
+set the DNSKEY-ADT bit (numeric flags value 259 for a combined signing key);
+note that changing the flags changes the key tag, so the parent DS must be
+updated to match. Setting ADT is an operator/zone-data decision; the server
+neither sets it nor depends on it.
+
 ## Relevant functions and symbols
 
 | Symbol | Role |
@@ -153,3 +196,58 @@ follows:
 In short: for DELEG occlusion of DE=0 clients we always prove nonexistence in
 a way that keeps the DELEG bit visible, regardless of whether the zone
 otherwise uses Compact Denial.
+
+### Why this response is unusual (and why it cannot be avoided)
+
+This is worth highlighting prominently, because it breaks an invariant that
+otherwise holds for a Compact Denial zone.
+
+**A compact-denial zone normally never emits a classic proof of nonexistence.**
+Its entire denial machinery is the NXNAME "black lie": an NSEC (or NSEC3) whose
+owner name *matches the queried name* and whose type bitmap carries the NXNAME
+pseudo-type. This is true of both the NOERROR and NXDOMAIN forms:
+
+- For a query without the Compact-Answers-OK (CO) flag, the zone returns
+  **NOERROR** plus the black lie (a CO-unaware resolver treats it as NODATA).
+- For a query *with* CO, the zone returns the **NXDOMAIN** rcode — but the
+  response body is still the same black lie. It is *not* a classic
+  [RFC4035] NXDOMAIN proof: there is no covering NSEC and no
+  closest-encloser / next-closer / wildcard chain. The rcode differs; the proof
+  construction does not.
+
+The DELEG-only occlusion response is therefore **the one case where a
+compact-denial zone emits a genuine, classic covering-NSEC (or NSEC3
+closest-encloser) proof of nonexistence in the response body** — the
+traditional-DNSSEC form the zone otherwise never produces. It also sets the
+NXDOMAIN rcode **unconditionally**, independent of the CO flag, whereas the
+ordinary black-lie NXDOMAIN rcode appears only when CO is set. Both the proof
+style and the CO-independence make this response unique within a compact-denial
+zone.
+
+**The novelty cannot be avoided without losing downgrade resistance.** The cut's
+NSEC does double duty:
+
+1. its interval (`cut` → `cut\000`, or the NSEC3 closest-encloser proof) proves
+   the queried name below the cut does not exist; and
+2. the **DELEG bit in its type bitmap discloses that a DELEG-only zone cut
+   exists above the queried name.**
+
+Because this is a DE=0 response, no DELEG RRset is returned anywhere in the
+message, so this NSEC bitmap is the *only* channel that discloses the cut's
+existence. A compact-denial black lie at the queried name cannot substitute:
+its owner is the queried name (below the cut, inside the invisible child
+namespace) and its bitmap carries NXNAME, not DELEG. Even a resolver that fully
+understands NXNAME black lies would learn only "the queried name does not
+exist" and nothing about the DELEG cut above it.
+
+That disclosure is what makes downgrade detection possible. Under a DE-flag
+stripping attack (delext §8.2.2), a DELEG-aware validator issues a DE=1 query,
+an on-path attacker clears the DE bit, and the server — now seeing DE=0 —
+produces this occlusion response. The DELEG bit in the cut's NSEC lets the
+validator (when the delegating zone has DNSKEY-ADT set) recognize that a
+Delegation Type exists at the cut and reject the downgraded answer as bogus.
+The classic covering NSEC and the DNSKEY-ADT flag are the two halves of one
+mechanism: the NSEC supplies the proof material, and ADT (delext §6.2) is what
+*compels* a validator to inspect the bitmap and act on it. Substituting a black
+lie would drop the DELEG bit and silently defeat the detection — so the unusual
+construction is required, not incidental.
