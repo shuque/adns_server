@@ -48,7 +48,7 @@ from sortedcontainers import SortedDict
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
-__version__ = '0.7.2'
+__version__ = '0.7.3'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'
@@ -83,8 +83,8 @@ class EdnsFlag(enum.IntFlag):
 class EDECode(enum.IntEnum):
     """Extended DNS Error Codes"""
     INVALID_QTYPE = 30
-    # Provisional value; IANA-TBD (deleg-10 5.2.2.1, INFO-CODE TBD3)
-    NEW_DELEGATION_ONLY = 31
+    # IANA-allocated INFO-CODE 34 (deleg-10 5.2.2.1)
+    NEW_DELEGATION_ONLY = 34
 
 class Finished(enum.Flag):
     """Finished Boolean enum"""

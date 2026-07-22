@@ -31,9 +31,8 @@ defined in the `RRtype` and `EdnsFlag` enums:
 - **EDNS(0) DE flag** (Delegation Extensions), bit 2 = `0x2000`, enum
   `EdnsFlag.DELEG_EXT_OK`. A DELEG-aware client sets it; the server echoes it in
   responses. Tested by `deleg_ext_ok(message)`.
-- **EDE "New Delegation Only"** — `EDECode.NEW_DELEGATION_ONLY` (provisional
-  value 31; IANA-TBD / INFO-CODE TBD3). Added to DE=0 responses for a
-  DELEG-only cut (deleg-10 5.2.2.1).
+- **EDE "New Delegation Only"** — `EDECode.NEW_DELEGATION_ONLY` (IANA-allocated
+  INFO-CODE 34). Added to DE=0 responses for a DELEG-only cut (deleg-10 5.2.2.1).
 
 A zone opts in to DELEG handling with `deleg_enabled: true` in the config
 (`Zone.deleg_enabled`). Without it, DELEG records are just opaque data.
@@ -127,7 +126,7 @@ neither sets it nor depends on it.
 |--------|------|
 | `RRtype.DELEG`, `RRtype.DELEGPARAM` | DELEG (61440) and DELEGPARAM (65433) type codes |
 | `EdnsFlag.DELEG_EXT_OK` | EDNS(0) DE flag (bit 2) |
-| `EDECode.NEW_DELEGATION_ONLY` | "New Delegation Only" EDE (provisional) |
+| `EDECode.NEW_DELEGATION_ONLY` | "New Delegation Only" EDE (INFO-CODE 34) |
 | `AUTH_IN_PARENT_RRTYPES` | `[DS, DELEG]` — types answered at the cut instead of referred |
 | `deleg_ext_ok(message)` | Is the DE flag set on the query? |
 | `Zone.deleg_enabled` | Per-zone opt-in to DELEG handling |

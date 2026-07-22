@@ -74,15 +74,18 @@ pip3 install .
 To install from the git repo directly:
 
 ```
-pip3 install git+https://github.com/shuque/adns_server.git@v0.7.0
+pip3 install git+https://github.com/shuque/adns_server.git
 ```
+
+To install a specific released version, append the tag, e.g.
+`...adns_server.git@v0.7.3`.
 
 ### Usage
 
 ```
 $ adns_server.py -h
 Reading config from: adnsconfig.yaml
-adns_server.py version 0.7.0
+adns_server.py version X.Y.Z
 Usage: adns_server.py [<Options>]
 
 Options:

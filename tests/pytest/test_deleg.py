@@ -101,7 +101,7 @@ def test_de0_below_deleg_only_cut_is_nxdomain(query, dnskey):
     r = query("www.sub5.deleg.test", "A", do=True, de=False)
     assert du.rcode(r) == "NXDOMAIN"
     assert du.has_flag(r, "AA")
-    assert 31 in du.ede_codes(r)
+    assert 34 in du.ede_codes(r)
     nsec = du.rrsets_of_type(r.authority, "NSEC")[0]
     assert du.nsec_matches(nsec, "sub5.deleg.test")
     assert du.nsec_covers(nsec, "www.sub5.deleg.test")
@@ -115,7 +115,7 @@ def test_de0_at_deleg_only_cut_is_nodata(query, dnskey):
     assert du.rcode(r) == "NOERROR"
     assert not r.answer
     assert du.has_flag(r, "AA")
-    assert 31 in du.ede_codes(r)
+    assert 34 in du.ede_codes(r)
     du.validate_all(r, dnskey("deleg.test"), "deleg.test")
 
 
@@ -149,7 +149,7 @@ def test_nsec3_de0_occlusion_nxdomain(query, dnskey):
     r = query("foo.degonly.nsec3.test", "A", do=True, de=False)
     assert du.rcode(r) == "NXDOMAIN"
     assert du.has_flag(r, "AA")
-    assert 31 in du.ede_codes(r)
+    assert 34 in du.ede_codes(r)
     nsec3s = du.rrsets_of_type(r.authority, "NSEC3")
     # closest encloser (the cut) matches and carries the DELEG bit
     assert any(du.nsec3_matches(n, "degonly.nsec3.test", "nsec3.test")
