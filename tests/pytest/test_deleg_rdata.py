@@ -7,6 +7,7 @@ records through dnspython's generic-rdata parser, exercises the DelegInfo
 key registry and value codecs, and checks the Section 3.4/3.5 validators.
 """
 
+import io
 import os
 import socket
 import struct
@@ -189,3 +190,48 @@ def test_mandatory_missing_key_strict_error():
     with pytest.raises(dr.DelegError, match="mandatory"):
         rdata_of("server-ipv4=192.0.2.1", "mandatory=server-ipv6",
                  strict=True)
+
+
+# --------------------------------------------------------------------------
+# Verbose RDATA breakdown (describe_rdata)
+# --------------------------------------------------------------------------
+
+def describe(wire):
+    """Capture describe_rdata() output as a string."""
+    buf = io.StringIO()
+    dr.describe_rdata(wire, out=buf)
+    return buf.getvalue()
+
+
+def test_verbose_reports_octet_count_and_keys():
+    wire = rdata_of("server-ipv4=192.0.2.1", "server-ipv6=2001:db8::1")
+    text = describe(wire)
+    assert f"RDATA breakdown ({len(wire)} octets)" in text
+    assert "server-ipv4 (key 1)" in text
+    assert "server-ipv6 (key 2)" in text
+    # field lines with octet counts
+    assert "key    [2] 0001" in text
+    assert "length [2] 0004  (4)" in text
+    assert "192.0.2.1" in text
+    assert "2001:db8::1" in text
+
+
+def test_verbose_decodes_wire_names():
+    wire = rdata_of("server-name=ns1.example.,ns2.example.")
+    text = describe(wire)
+    assert "wire names:" in text
+    assert "ns1.example." in text
+    assert "ns2.example." in text
+
+
+def test_verbose_decodes_mandatory_key_numbers():
+    wire = rdata_of("server-ipv4=192.0.2.1", "mandatory=server-ipv4")
+    text = describe(wire)
+    assert "key numbers: 1 (server-ipv4)" in text
+
+
+def test_verbose_decodes_multiple_addresses():
+    wire = rdata_of("server-ipv4=192.0.2.1,192.0.2.2")
+    text = describe(wire)
+    assert "192.0.2.1" in text
+    assert "192.0.2.2" in text

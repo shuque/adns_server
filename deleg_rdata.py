@@ -30,7 +30,7 @@ import dns.name
 import dns.exception
 
 
-__version__ = '0.1.0'
+__version__ = '0.2.0'
 
 # Record type codes (pre-standardization; agreed with collaborators).
 RRTYPE = {
@@ -257,6 +257,96 @@ def format_rr(owner, rrtype_num, rdata, ttl=None):
             f"\\# {len(rdata)} {hexdata}")
 
 
+def _decode_names(value):
+    """Decode concatenated uncompressed wire-format names into
+    [(octets, name_text)] pairs."""
+    out = []
+    i = 0
+    while i < len(value):
+        start = i
+        labels = []
+        while True:
+            if i >= len(value):
+                # malformed; emit whatever remains as a raw chunk
+                return out + [(value[start:], "<malformed>")]
+            length = value[i]
+            i += 1
+            if length == 0:
+                break
+            labels.append(value[i:i + length].decode("latin-1"))
+            i += length
+        name = ".".join(labels) + "." if labels else "."
+        out.append((value[start:i], name))
+    return out
+
+
+def _decode_addrs(value, family, size):
+    """Decode concatenated fixed-size addresses into [(octets, text)] pairs."""
+    out = []
+    for i in range(0, len(value), size):
+        chunk = value[i:i + size]
+        try:
+            text = socket.inet_ntop(family, chunk)
+        except (OSError, ValueError):
+            text = "<malformed>"
+        out.append((chunk, text))
+    return out
+
+
+def _decode_mandatory(value):
+    """Decode a mandatory value into a list of (number, name) key references."""
+    out = []
+    for i in range(0, len(value), 2):
+        (num,) = struct.unpack_from("!H", value, i)
+        out.append((num, NAME_BY_KEY.get(num, f"key{num}")))
+    return out
+
+
+def describe_rdata(rdata, out=sys.stderr):
+    """Print an octet-level breakdown of DelegInfos RDATA to the given stream."""
+    print(f"\nRDATA breakdown ({len(rdata)} octets):", file=out)
+    i = 0
+    while i + 4 <= len(rdata):
+        keynum, vlen = struct.unpack_from("!HH", rdata, i)
+        value = rdata[i + 4:i + 4 + vlen]
+        name = NAME_BY_KEY.get(keynum, f"key{keynum}")
+        print(f"  DelegInfo: {name} (key {keynum})", file=out)
+        print(f"    key    [2] {rdata[i:i + 2].hex()}", file=out)
+        print(f"    length [2] {rdata[i + 2:i + 4].hex()}  ({vlen})", file=out)
+        print(f"    value [{vlen}] {value.hex()}", file=out)
+        _describe_value(keynum, value, out)
+        i += 4 + vlen
+
+
+def _describe_value(keynum, value, out):
+    """Print the decoded, per-element sub-breakdown of a DelegInfoValue."""
+    if keynum == 0:
+        refs = _decode_mandatory(value)
+        pretty = ", ".join(f"{num} ({nm})" for num, nm in refs)
+        print(f"             key numbers: {pretty}", file=out)
+    elif keynum == 1:
+        for chunk, text in _decode_addrs(value, socket.AF_INET, 4):
+            print(f"               [{len(chunk)}] {chunk.hex()}  {text}",
+                  file=out)
+    elif keynum == 2:
+        for chunk, text in _decode_addrs(value, socket.AF_INET6, 16):
+            print(f"               [{len(chunk)}] {chunk.hex()}  {text}",
+                  file=out)
+    elif keynum in (3, 4):
+        print("             wire names:", file=out)
+        for chunk, text in _decode_names(value):
+            print(f"               [{len(chunk)}] {chunk.hex()}  {text}",
+                  file=out)
+    else:
+        # Unknown key: show the value as latin-1 text if printable.
+        try:
+            text = value.decode("ascii")
+            if text.isprintable():
+                print(f"             value text: {text}", file=out)
+        except UnicodeDecodeError:
+            pass
+
+
 def process_arguments():
     """Process command line arguments."""
     parser = argparse.ArgumentParser(
@@ -278,6 +368,9 @@ def process_arguments():
     parser.add_argument("--strict", action="store_true",
                         help="treat Section 3.4/3.5 semantic violations as "
                              "errors instead of warnings")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="print an octet-level breakdown of the RDATA "
+                             "components to stderr")
     parser.add_argument("--version", action="version",
                         version=f"%(prog)s {__version__}")
     return parser.parse_args()
@@ -312,6 +405,9 @@ def main():
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
     print(format_rr(owner.to_text(), rrtype_num, rdata, ttl=config.ttl))
+    if config.verbose:
+        sys.stdout.flush()
+        describe_rdata(rdata)
 
 
 if __name__ == "__main__":

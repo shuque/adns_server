@@ -154,7 +154,7 @@ Usage:
 
 ```
 deleg_rdata.py [--type DELEG|DELEGPARAM] [--ttl N] [--origin NAME] [--strict] \
-               <owner> <key=value> ...
+               [-v] <owner> <key=value> ...
 ```
 
 - `--type` selects DELEG (61440, default) or DELEGPARAM (65433); both share the
@@ -164,6 +164,11 @@ deleg_rdata.py [--type DELEG|DELEGPARAM] [--ttl N] [--origin NAME] [--strict] \
   values (default: root).
 - `--strict` turns the Section 3.4 / 3.5 semantic checks into hard errors
   instead of warnings.
+- `-v` / `--verbose` prints an octet-level breakdown of the generated RDATA to
+  stderr — each DelegInfo split into its key/length/value fields with octet
+  counts, plus a decoded per-element view (addresses, wire names, or mandatory
+  key numbers). The RR line still goes to stdout, so `-v` is safe with
+  redirection.
 
 Supported `DelegInfoKey`s (deleg-10 Section 8.2.2 registry): `mandatory` (0),
 `server-ipv4` (1), `server-ipv6` (2), `server-name` (3), `include-delegparam`
