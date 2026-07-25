@@ -10,11 +10,10 @@ This server implements the authoritative-server behavior described in:
 - **draft-ietf-dnsop-delext-08** — the EDNS(0) DE flag, the Delegation Type
   code range, and the DNSKEY-ADT flag.
 
-Note: the copies checked into `specs/` are `draft-ietf-deleg-10.txt` and
-`draft-ietf-dnsop-delext-07.txt`. Where deleg-10 and delext-07 disagreed on
-`DE=0, QTYPE=DELEG` with an NS RRset present, delext-08 resolved the
-contradiction in favor of "when DE=0 the server treats Delegation Types as
-ordinary Data Types," which is the behavior implemented here.
+Both drafts are checked into `specs/`. Per delext-08, when the DE flag is 0 the
+server treats Delegation Types as ordinary Data Types (so an NS RRset at a
+delegation point occludes any DELEG RRset for DE=0 clients); this is the
+behavior implemented here.
 
 ## Type codes and signaling
 
@@ -137,6 +136,45 @@ neither sets it nor depends on it.
 | `occluded_nxdomain()`, `occluded_nxdomain_nsec3()` | DE=0 below-cut authoritative NXDOMAIN with DELEG-bit-preserving proof |
 | `add_new_delegation_only_ede()` | Adds the "New Delegation Only" EDE |
 | `add_nsec_matching()`, `add_nsec_online()` | NSEC/NSEC3 matching a name; the covering next-name form fires on NS **or** DELEG at a cut |
+
+## Generating DELEG/DELEGPARAM records: `deleg_rdata.py`
+
+DELEG and DELEGPARAM RDATA uses the SVCB `SvcParams` wire encoding (deleg-10
+Section 3), which most zone-editing tools cannot produce. The `deleg_rdata.py`
+helper (in the repository root) generates a zonefile-ready resource record in
+RFC 3597 generic (`\#`) format from presentation-format `DelegInfoKey=value`
+pairs:
+
+```
+$ ./deleg_rdata.py child.example. server-ipv4=192.0.2.1 server-ipv6=2001:db8::1
+child.example. IN TYPE61440 \# 28 00010004c00002010002001020010db8000000000000000000000001
+```
+
+Usage:
+
+```
+deleg_rdata.py [--type DELEG|DELEGPARAM] [--ttl N] [--origin NAME] [--strict] \
+               <owner> <key=value> ...
+```
+
+- `--type` selects DELEG (61440, default) or DELEGPARAM (65433); both share the
+  same format. A numeric type code is also accepted.
+- `--ttl` includes a TTL in the emitted record (omitted by default).
+- `--origin` resolves relative names in `server-name` / `include-delegparam`
+  values (default: root).
+- `--strict` turns the Section 3.4 / 3.5 semantic checks into hard errors
+  instead of warnings.
+
+Supported `DelegInfoKey`s (deleg-10 Section 8.2.2 registry): `mandatory` (0),
+`server-ipv4` (1), `server-ipv6` (2), `server-name` (3), `include-delegparam`
+(4), and the RFC 9460 unknown-key form `keyNNNNN`. The tool enforces the
+wire-format rules (keys sorted in strictly increasing order, no duplicate keys,
+non-empty values) and warns — or, with `--strict`, errors — on the semantic
+rules: exactly one server-information "shape" per record (Section 3.4) and every
+`mandatory`-referenced key present in the record (Section 3.5).
+
+The current DELEG records in the example zones under `zones/` predate the
+finalized Section 3 format and should be regenerated with this tool.
 
 ## Divergence from the specifications
 
