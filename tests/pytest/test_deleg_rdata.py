@@ -235,3 +235,59 @@ def test_verbose_decodes_multiple_addresses():
     text = describe(wire)
     assert "192.0.2.1" in text
     assert "192.0.2.2" in text
+
+
+# --------------------------------------------------------------------------
+# draft-ietf-deleg-11 Appendix B test vectors
+#
+# Independent conformance oracle: the expected wire bytes are the hand-computed
+# hex published in the draft (Figures 1-4), not values derived from this tool.
+# --------------------------------------------------------------------------
+
+def test_vector_mandatory_server_ipv4():
+    # Figure 1: mandatory=server-ipv4, server-ipv4=192.0.2.1,192.0.2.2
+    expected = bytes.fromhex(
+        "0000"          # key 0 (mandatory)
+        "0002"          # length 2
+        "0001"          # value: key number 1
+        "0001"          # key 1 (server-ipv4)
+        "0008"          # length 8
+        "c0000201"      # 192.0.2.1
+        "c0000202")     # 192.0.2.2
+    wire = rdata_of("mandatory=server-ipv4",
+                    "server-ipv4=192.0.2.1,192.0.2.2")
+    assert wire == expected
+
+
+def test_vector_server_ipv6():
+    # Figure 2: server-ipv6=2001:db8::1,2001:db8::53:1
+    expected = bytes.fromhex(
+        "0002"                                  # key 2 (server-ipv6)
+        "0020"                                  # length 32
+        "20010db8000000000000000000000001"      # 2001:db8::1
+        "20010db8000000000000000000530001")     # 2001:db8::53:1
+    wire = rdata_of("server-ipv6=2001:db8::1,2001:db8::53:1")
+    assert wire == expected
+
+
+def test_vector_server_name_case_preserved():
+    # Figure 3: server-name=NS2.EXAMPLE.NET.,ns3.example.org.
+    # The first name's uppercase MUST be preserved on the wire (DelegInfo
+    # names are not downcased): 03 'NS2' 07 'EXAMPLE' 03 'NET' 00.
+    expected = bytes.fromhex(
+        "0003"                                  # key 3 (server-name)
+        "0022"                                  # length 34
+        "034e5332074558414d504c45034e455400"    # NS2.EXAMPLE.NET.
+        "036e7333076578616d706c65036f726700")   # ns3.example.org.
+    wire = rdata_of("server-name=NS2.EXAMPLE.NET.,ns3.example.org.")
+    assert wire == expected
+
+
+def test_vector_include_delegparam():
+    # Figure 4: include-delegparam=param.example.net.
+    expected = bytes.fromhex(
+        "0004"                                  # key 4 (include-delegparam)
+        "0013"                                  # length 19
+        "05706172616d076578616d706c65036e657400")   # param.example.net.
+    wire = rdata_of("include-delegparam=param.example.net.")
+    assert wire == expected
