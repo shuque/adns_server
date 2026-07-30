@@ -11,6 +11,7 @@ Set ADNS_TEST_KEEP_LOG=1 to print the server log on teardown (useful when a
 launch fails).
 """
 
+import contextlib
 import os
 import socket
 import subprocess
@@ -33,6 +34,7 @@ REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 SERVER = os.path.join(REPO_ROOT, "adns_server.py")
 ZONE_DIR = os.path.join(HERE, "test_zones")
 CONFIG = os.path.join(ZONE_DIR, "test.yaml")
+MINIMAL_ANY_CONFIG = os.path.join(ZONE_DIR, "test-minimal-any.yaml")
 
 DE_FLAG = 0x2000       # EDNS(0) DE (Delegation Extensions) flag
 CO_FLAG = 0x4000       # EDNS(0) CO (Compact Answers OK) flag
@@ -65,19 +67,18 @@ def _wait_until_ready(host, port, proc, timeout=10.0):
     return False
 
 
-@pytest.fixture(scope="session")
-def server():
+@contextlib.contextmanager
+def _launch_server(config, logname):
     """
-    Launch adns_server on an ephemeral loopback port for the whole session.
-
-    Yields an (host, port) tuple. The server's working directory is the
-    test_zones/ directory so the relative paths in test.yaml resolve.
+    Launch adns_server on an ephemeral loopback port with the given config,
+    yielding a (host, port) tuple. The working directory is test_zones/ so the
+    relative paths in the config resolve.
     """
     host = "127.0.0.1"
     port = _free_port()
-    logfile = open(os.path.join(HERE, ".server.log"), "w+", encoding="utf-8")
+    logfile = open(os.path.join(HERE, logname), "w+", encoding="utf-8")
     proc = subprocess.Popen(
-        [sys.executable, SERVER, "-c", CONFIG, "-s", host, "-p", str(port),
+        [sys.executable, SERVER, "-c", config, "-s", host, "-p", str(port),
          "-f", "-d"],
         cwd=ZONE_DIR, stdout=logfile, stderr=subprocess.STDOUT)
 
@@ -88,37 +89,46 @@ def server():
         logfile.close()
         pytest.fail(f"adns_server failed to start on {host}:{port}\n{log}")
 
-    yield (host, port)
-
-    proc.terminate()
     try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-    logfile.seek(0)
-    if os.environ.get("ADNS_TEST_KEEP_LOG"):
-        print("\n--- server log ---\n" + logfile.read())
-    logfile.close()
+        yield (host, port)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        logfile.seek(0)
+        if os.environ.get("ADNS_TEST_KEEP_LOG"):
+            print("\n--- server log ---\n" + logfile.read())
+        logfile.close()
 
 
 @pytest.fixture(scope="session")
-def query(server):
+def server():
     """
-    Return a function that sends a query to the test server and returns the
-    parsed response message.
+    Launch adns_server on an ephemeral loopback port for the whole session,
+    using test.yaml (conventional ANY: minimal_any=false).
 
-        resp = query("www.deleg.test", "A", do=True, de=True)
-
-    Keyword flags:
-      do      -- set the DNSSEC OK bit (request signatures)
-      de      -- set the Delegation Extensions (DE) EDNS flag
-      co      -- set the Compact Answers OK EDNS flag
-      cookie  -- bytes for an EDNS COOKIE option
-      udpsize -- advertised EDNS UDP payload size
-      tcp     -- use TCP instead of UDP
-      case_randomize -- apply 0x20 mixed-case randomization to the qname
+    Yields an (host, port) tuple.
     """
-    host, port = server
+    with _launch_server(CONFIG, ".server.log") as endpoint:
+        yield endpoint
+
+
+@pytest.fixture(scope="session")
+def minimal_any_server():
+    """
+    A second server instance using test-minimal-any.yaml (minimal_any=true), to
+    exercise the RFC 8482 minimal-ANY code path. Deployments typically enable
+    this; the prototyping default (test.yaml) leaves it off.
+    """
+    with _launch_server(MINIMAL_ANY_CONFIG, ".server-minany.log") as endpoint:
+        yield endpoint
+
+
+def _make_query_fn(endpoint):
+    """Build a query function bound to a given (host, port) endpoint."""
+    host, port = endpoint
 
     def _query(qname, qtype="A", *, do=False, de=False, co=False,
                cookie=None, udpsize=1232, tcp=False, case_randomize=False,
@@ -158,6 +168,32 @@ def query(server):
         return dns.query.udp(msg, host, port=port, timeout=timeout)
 
     return _query
+
+
+@pytest.fixture(scope="session")
+def query(server):
+    """
+    Return a function that sends a query to the test server and returns the
+    parsed response message.
+
+        resp = query("www.deleg.test", "A", do=True, de=True)
+
+    Keyword flags:
+      do      -- set the DNSSEC OK bit (request signatures)
+      de      -- set the Delegation Extensions (DE) EDNS flag
+      co      -- set the Compact Answers OK EDNS flag
+      cookie  -- bytes for an EDNS COOKIE option
+      udpsize -- advertised EDNS UDP payload size
+      tcp     -- use TCP instead of UDP
+      case_randomize -- apply 0x20 mixed-case randomization to the qname
+    """
+    return _make_query_fn(server)
+
+
+@pytest.fixture(scope="session")
+def minimal_any_query(minimal_any_server):
+    """Like `query`, but bound to the minimal_any=true server instance."""
+    return _make_query_fn(minimal_any_server)
 
 
 @pytest.fixture(scope="session")

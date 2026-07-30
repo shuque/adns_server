@@ -1,0 +1,33 @@
+# Configuration for the RFC 8482 minimal-ANY path of the pytest suite.
+# Identical to test.yaml except minimal_any is enabled. The suite launches a
+# second server instance from this file (the minimal_any_server fixture) so
+# both the conventional and minimal ANY code paths are covered. This mirrors
+# real deployments, which typically enable minimal ANY (conventional ANY is a
+# traffic-amplification vector); the prototyping default in test.yaml leaves it
+# off.
+config:
+  edns: 1432
+  minimal_any: true
+zones:
+  # NSEC, online signing, compact denial, DELEG enabled (DNSKEY-ADT set).
+  - name: "deleg.test"
+    file: "deleg.test/zonefile"
+    dnssec: true
+    dynamic_signing: true
+    compact_denial: true
+    private_key: "deleg.test/privkey.pem"
+    deleg_enabled: true
+
+  # NSEC3, online signing, DELEG enabled.
+  - name: "nsec3.test"
+    file: "nsec3.test/zonefile"
+    dnssec: true
+    dynamic_signing: true
+    private_key: "nsec3.test/privkey.pem"
+    deleg_enabled: true
+
+  # Unsigned zone, DELEG enabled.
+  - name: "unsigned.test"
+    file: "unsigned.test/zonefile"
+    dnssec: false
+    deleg_enabled: true

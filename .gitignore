@@ -13,3 +13,4 @@ scratch/
 tests/*
 !tests/pytest/
 tests/pytest/.server.log
+tests/pytest/.server-minany.log

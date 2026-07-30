@@ -1,5 +1,5 @@
 """
-DELEG referral and occlusion behavior (draft-ietf-deleg-10 / delext-08).
+DELEG referral and occlusion behavior (draft-ietf-deleg-11 / delext-10).
 
 Exercises the DE=1 (DELEG-aware) and DE=0 (DELEG-unaware) code paths against
 the deleg.test (NSEC + compact) and nsec3.test (NSEC3) zones, and the
@@ -125,6 +125,86 @@ def test_de0_qtype_deleg_returned_as_data(query, dnskey):
     assert du.rcode(r) == "NOERROR"
     assert du.has_flag(r, "AA")
     assert du.rrsets_of_type(r.answer, DELEG)
+    du.validate_all(r, dnskey("deleg.test"), "deleg.test")
+
+
+# --------------------------------------------------------------------------
+# QTYPE=ANY at a delegation point -- delext-10 4.3
+#
+# "Queries for type ANY where the QNAME matches a delegation point with
+# Delegation Types present MUST behave the same way as if a DS record was
+# present at the delegation point." In practice this means ANY at a cut is
+# routed through delegation handling (never a leaf-data dump, never a descent
+# into the occluded child), because ANY is not in AUTH_IN_PARENT_RRTYPES.
+#
+# These tests hold regardless of the minimal_any (RFC 8482) setting: the cut
+# routing is answered before ANY is ever expanded, and the one data-answer case
+# (sub5, DE=0) has DELEG as its only data type, so its answer is identical under
+# both settings. The suite runs with minimal_any=false, but real deployments
+# typically enable it (conventional ANY is a traffic-amplification vector).
+# --------------------------------------------------------------------------
+
+def test_de1_any_at_deleg_cut_is_referral(query, dnskey):
+    """sub1 (NS+DS+DELEG), DE=1, QTYPE=ANY: DELEG-aware referral, not a data
+    dump -- DELEG+DS in authority, no NS, AA=0 (as-if-DS: a referral)."""
+    r = query("sub1.deleg.test", "ANY", do=True, de=True)
+    types = du.section_types(r.authority)
+    assert DELEG in types
+    assert "DS" in types
+    assert "NS" not in types
+    assert not r.answer
+    assert not du.has_flag(r, "AA")
+    du.validate_all(r, dnskey("deleg.test"), "deleg.test")
+
+
+def test_de0_any_at_ns_cut_is_referral(query):
+    """sub1 with DE=0, QTYPE=ANY: NS occludes DELEG -> legacy NS referral
+    (as-if-DS: ANY at an NS cut refers), AA=0."""
+    r = query("sub1.deleg.test", "ANY", do=True, de=False)
+    types = du.section_types(r.authority)
+    assert "NS" in types
+    assert DELEG not in types
+    assert not r.answer
+    assert not du.has_flag(r, "AA")
+
+
+def test_de1_any_at_deleg_only_cut_is_referral(query, dnskey):
+    """sub5 (DELEG only), DE=1, QTYPE=ANY: DELEG referral with covering NSEC,
+    AA=0 -- not a data dump."""
+    r = query("sub5.deleg.test", "ANY", do=True, de=True)
+    types = du.section_types(r.authority)
+    assert DELEG in types
+    assert "NS" not in types
+    assert not r.answer
+    assert not du.has_flag(r, "AA")
+    du.validate_all(r, dnskey("deleg.test"), "deleg.test")
+
+
+def test_de0_any_at_deleg_only_cut_is_data(query, dnskey):
+    """sub5 (DELEG only) name itself, DE=0, QTYPE=ANY: no NS means no cut for a
+    DELEG-unaware client, so DELEG is answered as ordinary data (AA=1) with the
+    New Delegation Only EDE. The child namespace is never exposed."""
+    r = query("sub5.deleg.test", "ANY", do=True, de=False)
+    assert du.rcode(r) == "NOERROR"
+    assert du.has_flag(r, "AA")
+    assert du.rrsets_of_type(r.answer, DELEG)
+    assert "NS" not in du.section_types(r.answer)
+    assert 34 in du.ede_codes(r)
+    du.validate_all(r, dnskey("deleg.test"), "deleg.test")
+
+
+def test_de0_any_below_deleg_only_cut_is_occluded(query, dnskey):
+    """sub5, DE=0, QTYPE=ANY below the cut: authoritative NXDOMAIN with the
+    DELEG-bit-preserving covering NSEC -- ANY does not leak the occluded
+    child namespace."""
+    r = query("www.sub5.deleg.test", "ANY", do=True, de=False)
+    assert du.rcode(r) == "NXDOMAIN"
+    assert du.has_flag(r, "AA")
+    assert 34 in du.ede_codes(r)
+    nsec = du.rrsets_of_type(r.authority, "NSEC")[0]
+    assert du.nsec_matches(nsec, "sub5.deleg.test")
+    assert du.nsec_covers(nsec, "www.sub5.deleg.test")
+    assert DELEG in du.nsec_bitmap(nsec)
     du.validate_all(r, dnskey("deleg.test"), "deleg.test")
 
 

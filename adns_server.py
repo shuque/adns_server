@@ -221,6 +221,12 @@ def make_single_zone(prefs, zonename, config):
             zone.init_key(privatekey)
             zone.compact_denial = config.get('compact_denial', False)
     zone.deleg_enabled = config.get('deleg_enabled', False)
+    if zone.deleg_enabled:
+        try:
+            zone.reject_wildcard_deleg()
+        except ValueError as exc_info:
+            print(f"error: load zone {zonename} failed: {exc_info}")
+            sys.exit(1)
     zone.udp_truncate_all = config.get('udp_truncate_all', False)
     zone.require_server_cookie = config.get('require_server_cookie', False)
     return zone
@@ -659,6 +665,22 @@ class Zone(dns.zone.Zone):
             if search_index < 0:
                 break
         return None
+
+    def reject_wildcard_deleg(self):
+        """
+        Enforce delext-10 4.4: a wildcard owner name MUST NOT have Delegation
+        Types. Wildcard expansion (RFC 4592) does not create delegation points,
+        so a DELEG RRset at a '*' owner is prohibited. Raises ValueError on the
+        first offending owner. Only meaningful when deleg_enabled is set (else
+        DELEG is opaque data); the caller gates on that.
+        """
+        for name, node in self.nodes.items():
+            if name.labels[0] != b'*':
+                continue
+            if node.get_rdataset(dns.rdataclass.IN, RRtype.DELEG):
+                raise ValueError(
+                    f"wildcard owner {name} has a DELEG RRset; delext-10 4.4 "
+                    f"prohibits Delegation Types at a wildcard domain name")
 
     def __str__(self):
         return f"<Zone: {self.origin}>"

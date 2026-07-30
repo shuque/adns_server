@@ -37,9 +37,29 @@ def test_meta_qtype_refused(query):
     assert du.rcode(r) == "FORMERR"
 
 
-def test_any_query(query):
-    """ANY returns the available data at the name."""
+def test_any_query_conventional(query):
+    """
+    Conventional ANY (minimal_any=false, the prototyping default) returns ALL
+    RRsets at the owner. www.deleg.test has both A and AAAA, so both appear.
+    """
     r = query("www.deleg.test", "ANY", do=True)
     assert du.rcode(r) == "NOERROR"
+    assert du.has_flag(r, "AA")
     types = du.section_types(r.answer)
-    assert "A" in types or "AAAA" in types
+    assert "A" in types
+    assert "AAAA" in types
+
+
+def test_any_query_minimal(minimal_any_query):
+    """
+    Minimal ANY (RFC 8482, minimal_any=true) returns a single RRset at the
+    owner even though www.deleg.test has both A and AAAA -- the amplification
+    mitigation real deployments enable.
+    """
+    r = minimal_any_query("www.deleg.test", "ANY", do=True)
+    assert du.rcode(r) == "NOERROR"
+    assert du.has_flag(r, "AA")
+    # Only one data RRset is returned (RRSIGs excepted).
+    data_types = [t for t in du.section_types(r.answer) if t != "RRSIG"]
+    assert len(data_types) == 1
+    assert data_types[0] in ("A", "AAAA")
