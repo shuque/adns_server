@@ -6,14 +6,24 @@ Implementation notes for the DELEG delegation mechanism in `adns_server.py`.
 
 This server implements the authoritative-server behavior described in:
 
-- **draft-ietf-deleg-10** — the DELEG record and delegation semantics.
-- **draft-ietf-dnsop-delext-08** — the EDNS(0) DE flag, the Delegation Type
-  code range, and the DNSKEY-ADT flag.
+- **draft-ietf-deleg-11** — the DELEG/DELEGPARAM record types, their RDATA
+  format, and the delegation semantics.
+- **draft-ietf-dnsop-delext-10** — the EDNS(0) DE flag, the Delegation Type
+  code range, the DNSKEY-ADT flag, referral handling, and (as of -10) the
+  DNSSEC proof rules, the "finding the best servers" algorithm, and the CDOE
+  interaction.
 
-Both drafts are checked into `specs/`. Per delext-08, when the DE flag is 0 the
-server treats Delegation Types as ordinary Data Types (so an NS RRset at a
-delegation point occludes any DELEG RRset for DE=0 clients); this is the
-behavior implemented here.
+Both drafts are checked into `specs/` (along with the superseded -10/-08
+copies). Note the re-layering that happened at deleg-11 / delext-10: **delext
+is now the normative core.** Content that used to live in the deleg draft —
+the best-server algorithm, the nonexistence-proof and insecure-delegation
+clarifications, and the referral/validator downgrade rules — moved into delext
+(§5.3, §6.2–§6.4). deleg-11 now defers to delext for all of it; delext-10's
+`Updates:` clause grew to `1034, 4035, 6672, 6840, 6895, 9824` accordingly.
+
+Per delext §4.1, when the DE flag is 0 the server treats Delegation Types as
+ordinary Data Types (so an NS RRset at a delegation point occludes any DELEG
+RRset for DE=0 clients); this is the behavior implemented here.
 
 ## Type codes and signaling
 
@@ -30,8 +40,10 @@ defined in the `RRtype` and `EdnsFlag` enums:
 - **EDNS(0) DE flag** (Delegation Extensions), bit 2 = `0x2000`, enum
   `EdnsFlag.DELEG_EXT_OK`. A DELEG-aware client sets it; the server echoes it in
   responses. Tested by `deleg_ext_ok(message)`.
-- **EDE "New Delegation Only"** — `EDECode.NEW_DELEGATION_ONLY` (IANA-allocated
-  INFO-CODE 34). Added to DE=0 responses for a DELEG-only cut (deleg-10 5.2.2.1).
+- **EDE "New Delegation Only"** — `EDECode.NEW_DELEGATION_ONLY` (INFO-CODE 34).
+  Added to DE=0 responses for a DELEG-only cut (deleg-11 5.2.2.1). delext-08 had
+  intended to allocate its own "Delegation Extension Support Required" code;
+  delext-10 dropped that (its old §9.5) and now points at deleg's code 34.
 
 A zone opts in to DELEG handling with `deleg_enabled: true` in the config
 (`Zone.deleg_enabled`). Without it, DELEG records are just opaque data.
@@ -43,34 +55,37 @@ A DELEG-aware client (DE=1) is served according to the DELEG rules; a
 DELEG-unaware client (DE=0) is served exactly as a non-DELEG server would,
 i.e. Delegation Types are treated as ordinary data types.
 
-### DE=1 (DELEG-aware client) — deleg-10 5.2.1
+### DE=1 (DELEG-aware client) — delext §4.1, deleg-11 5.2.1
 
 Handled by `do_referral_deleg()`:
 
 - **DELEG RRset present** (with or without NS): the DELEG RRset goes into the
-  Authority section and the **NS RRset is NOT included**. If a DS RRset is
-  present it is added (secure delegation); otherwise an NSEC/NSEC3 matching the
-  cut proves DS absence (insecure delegation).
+  Authority section and the **NS RRset is NOT included** — delext-10 §4.1
+  strengthened this to a MUST/MUST NOT, and made explicit that the NS RRset is
+  omitted *even when QTYPE=NS*. If a DS RRset is present it is added (secure
+  delegation); otherwise an NSEC/NSEC3 matching the cut proves DS absence
+  (insecure delegation).
 - **NS present, no DELEG**: a legacy NS referral (via
   `do_referral_traditional()`), **plus** an NSEC/NSEC3 matching the cut to prove
-  the absence of the DELEG RRset (deleg-10 5.2.1.3). In practice the same
+  the absence of the DELEG RRset (deleg-11 5.2.1.2). In practice the same
   record proves both DS and DELEG (non)existence.
 
 RRSIGs are attached to authoritative RRsets when DO=1, per RFC 4035.
 
-### DE=0 (DELEG-unaware client) — deleg-10 5.2.2
+### DE=0 (DELEG-unaware client) — delext §4.1, deleg-11 5.2.2
 
 Handled in `process_name()`:
 
 - **NS present** (with or without DELEG): NS occludes the DELEG RRset; a normal
   legacy referral is produced (`do_referral_traditional()`). This is the
-  delext-08 "treat Delegation Types as Data Types" rule.
+  delext §4.1 "treat Delegation Types as Data Types" rule.
 - **DELEG-only cut** (DELEG present, no NS): the child zone is invisible to the
   client. A query *for the cut name itself* falls through to normal record
   lookup (`find_rrtype()`) — returning the DELEG/DS RRset as ordinary data, or
   NODATA. A query *below the cut* returns an authoritative NXDOMAIN
   (`occluded_nxdomain()`). In both cases a "New Delegation Only" EDE is added
-  (`add_new_delegation_only_ede()`).
+  (`add_new_delegation_only_ede()`). The DNSSEC proof construction for this
+  case is now mandated by delext-10 §4.1.1 — see the CDOE section below.
 
 Because the DE=0 occlusion path uses NODATA / NXDOMAIN (never a referral), the
 Authoritative Answer (AA) bit is set — the parent is authoritative for these
@@ -87,6 +102,18 @@ validating resolvers* (delext 6.1/6.2 — "indicates to a validator that a
 referral MUST contain an NSEC or NSEC3 record..."), not a precondition for the
 authoritative server's behavior. The server simply serves whatever DNSKEY flags
 are present in the zone data.
+
+A note on the deleg-11 / delext-10 wording change: deleg-11 §2 now says the
+protocol "**mandates** the use of DNSKEY-ADT" (deleg-10 §2 merely said it
+"uses" it), and the signer-side rule — "DNSSEC-signed zones which contain a
+DELEG RRset MUST set the ADT flag" — was already a MUST in deleg-10 §5.3 and is
+now stated by reference to delext (deleg-11 §5.3 → delext §6). So the mandate is
+a *signer/operator* obligation for downgrade resistance, unchanged in substance;
+it is **not** a precondition on this authoritative server, which neither sets
+nor inspects ADT. delext-10 §6.2 also newly makes explicit that when ADT is
+clear a validator **SHOULD NOT** treat a DELEG referral as bogus — i.e. ADT
+genuinely remains opt-in at the zone level. Where the signer-side MUST bites is
+our (future) DELEG-aware signer, not the responder.
 
 What the drafts require and permit:
 
@@ -139,7 +166,7 @@ neither sets it nor depends on it.
 
 ## Generating DELEG/DELEGPARAM records: `deleg_rdata.py`
 
-DELEG and DELEGPARAM RDATA uses the SVCB `SvcParams` wire encoding (deleg-10
+DELEG and DELEGPARAM RDATA uses the SVCB `SvcParams` wire encoding (deleg-11
 Section 3), which most zone-editing tools cannot produce. The `deleg_rdata.py`
 helper (in the repository root) generates a zonefile-ready resource record in
 RFC 3597 generic (`\#`) format from presentation-format `DelegInfoKey=value`
@@ -170,7 +197,7 @@ deleg_rdata.py [--type DELEG|DELEGPARAM] [--ttl N] [--origin NAME] [--strict] \
   key numbers). The RR line still goes to stdout, so `-v` is safe with
   redirection.
 
-Supported `DelegInfoKey`s (deleg-10 Section 8.2.2 registry): `mandatory` (0),
+Supported `DelegInfoKey`s (deleg-11 Section 8.2.2 registry): `mandatory` (0),
 `server-ipv4` (1), `server-ipv6` (2), `server-name` (3), `include-delegparam`
 (4), and the RFC 9460 unknown-key form `keyNNNNN`. The tool enforces the
 wire-format rules (keys sorted in strictly increasing order, no duplicate keys,
@@ -178,31 +205,45 @@ non-empty values) and warns — or, with `--strict`, errors — on the semantic
 rules: exactly one server-information "shape" per record (Section 3.4) and every
 `mandatory`-referenced key present in the record (Section 3.5).
 
+The tool's encoder is validated against the four **Appendix B test vectors** of
+deleg-11 (`tests/pytest/test_deleg_rdata.py`, the `test_vector_*` cases): the
+expected wire bytes there are the draft's hand-computed hex, so they are an
+independent conformance oracle rather than a self-consistency check. The
+`server-name` vector (`NS2.EXAMPLE.NET.`) also confirms that names in a
+DelegInfo value are **not** downcased on the wire.
+
 The current DELEG records in the example zones under `zones/` predate the
 finalized Section 3 format and should be regenerated with this tool.
-
-## Divergence from the specifications
-
-The one place this implementation makes a choice not dictated by the drafts is
-the interaction between **Compact Denial of Existence** and **DELEG occlusion**
-on the DE=0 below-cut NXDOMAIN. The drafts are silent on it; the decision and
-its rationale are documented in the next section.
 
 ## Compact Denial of Existence (CDOE) and DELEG occlusion
 
 When a DELEG-unaware client (EDNS DE flag = 0) queries a name *below* a
 DELEG-only delegation cut (a name that has a DELEG RRset but no NS RRset),
-deleg-10 §5.2.2.1 requires the delegating (parent) server to return an
+deleg-11 §5.2.2.1 requires the delegating (parent) server to return an
 authoritative NXDOMAIN — AA=1, parent SOA — because the DELEG-only child zone
-is invisible to a DELEG-unaware client. deleg-10 Appendix A.4.2.3 shows the
+is invisible to a DELEG-unaware client. deleg-11 Appendix A.4.2.3 shows the
 DNSSEC proof as the NSEC record *matching the cut*, carrying the DELEG type
 bit, e.g.:
 
     test.  NSEC  . RRSIG NSEC DELEG
 
-**The drafts are silent on how this interacts with Compact Denial of Existence
-(RFC 9824).** (To be raised with the authors.) This server resolves it as
-follows:
+**As of delext-10 this is no longer a divergence: the CDOE interaction is now
+specified normatively, and this server conforms to it.** Earlier revisions of
+the drafts were silent on how the occlusion response interacts with Compact
+Denial of Existence (RFC 9824); the construction below was proposed to the
+authors and was incorporated, essentially verbatim, into **delext-10 §4.1.1**
+("Compact Denial of Existence"), with a matching security-side requirement in
+**delext-10 §8.4**. delext-10 now makes both points a **MUST**:
+
+- the occlusion negative response MUST be a conventional Name Error proof
+  (RFC 4035, or RFC 5155 for NSEC3), **not** an NXNAME-based CDOE response; and
+- it MUST be returned regardless of whether the query set the Compact-Answers-OK
+  (CO) flag.
+
+delext-10 §8.4 further states that a CDOE server MUST NOT satisfy this proof
+with an NXNAME response matching the queried name, "because such a response
+omits the Delegation Type bits at the delegation point on which this detection
+relies." That is exactly the behavior implemented here:
 
 - The occlusion NXDOMAIN is proven with the NSEC/NSEC3 record **matching the
   cut**, whose type bitmap includes the **DELEG** bit. We do **not** emit a
