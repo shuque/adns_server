@@ -13,14 +13,6 @@ This server implements the authoritative-server behavior described in:
   DNSSEC proof rules, the "finding the best servers" algorithm, and the CDOE
   interaction.
 
-Both drafts are checked into `specs/` (along with the superseded -10/-08
-copies). Note the re-layering that happened at deleg-11 / delext-10: **delext
-is now the normative core.** Content that used to live in the deleg draft —
-the best-server algorithm, the nonexistence-proof and insecure-delegation
-clarifications, and the referral/validator downgrade rules — moved into delext
-(§5.3, §6.2–§6.4). deleg-11 now defers to delext for all of it; delext-10's
-`Updates:` clause grew to `1034, 4035, 6672, 6840, 6895, 9824` accordingly.
-
 Per delext §4.1, when the DE flag is 0 the server treats Delegation Types as
 ordinary Data Types (so an NS RRset at a delegation point occludes any DELEG
 RRset for DE=0 clients); this is the behavior implemented here.
@@ -41,9 +33,7 @@ defined in the `RRtype` and `EdnsFlag` enums:
   `EdnsFlag.DELEG_EXT_OK`. A DELEG-aware client sets it; the server echoes it in
   responses. Tested by `deleg_ext_ok(message)`.
 - **EDE "New Delegation Only"** — `EDECode.NEW_DELEGATION_ONLY` (INFO-CODE 34).
-  Added to DE=0 responses for a DELEG-only cut (deleg-11 5.2.2.1). delext-08 had
-  intended to allocate its own "Delegation Extension Support Required" code;
-  delext-10 dropped that (its old §9.5) and now points at deleg's code 34.
+  Added to DE=0 responses for a DELEG-only cut (deleg-11 5.2.2.1).
 
 A zone opts in to DELEG handling with `deleg_enabled: true` in the config
 (`Zone.deleg_enabled`). Without it, DELEG records are just opaque data.
@@ -93,27 +83,15 @@ answers.
 
 ## Signing, the DNSKEY-ADT flag, and downgrade resistance
 
-A point that is easy to get wrong: serving DELEG and offering *downgrade
-resistance* for DELEG are two independent things. This server acts as a DELEG
-authority whenever a zone has `deleg_enabled: true` and carries DELEG records;
-it does **not** require the zone to be signed, and it does **not** require (or
-even inspect) the DNSKEY-ADT flag. The DNSKEY-ADT flag is a signal *for
-validating resolvers* (delext 6.1/6.2 — "indicates to a validator that a
-referral MUST contain an NSEC or NSEC3 record..."), not a precondition for the
-authoritative server's behavior. The server simply serves whatever DNSKEY flags
-are present in the zone data.
-
-A note on the deleg-11 / delext-10 wording change: deleg-11 §2 now says the
-protocol "**mandates** the use of DNSKEY-ADT" (deleg-10 §2 merely said it
-"uses" it), and the signer-side rule — "DNSSEC-signed zones which contain a
-DELEG RRset MUST set the ADT flag" — was already a MUST in deleg-10 §5.3 and is
-now stated by reference to delext (deleg-11 §5.3 → delext §6). So the mandate is
-a *signer/operator* obligation for downgrade resistance, unchanged in substance;
-it is **not** a precondition on this authoritative server, which neither sets
-nor inspects ADT. delext-10 §6.2 also newly makes explicit that when ADT is
-clear a validator **SHOULD NOT** treat a DELEG referral as bogus — i.e. ADT
-genuinely remains opt-in at the zone level. Where the signer-side MUST bites is
-our (future) DELEG-aware signer, not the responder.
+Serving DELEG and offering *downgrade resistance* for DELEG are two
+independent things. This server acts as a DELEG authority whenever a
+zone has `deleg_enabled: true` and carries DELEG records; it does
+**not** require the zone to be signed, and it does **not** require (or
+even inspect) the DNSKEY-ADT flag. The DNSKEY-ADT flag is a signal
+*for validating resolvers* (delext 6.1/6.2 — "indicates to a validator
+that a referral MUST contain an NSEC or NSEC3 record..."), not a
+precondition for the authoritative server's behavior. The server
+simply serves whatever DNSKEY flags are present in the zone data.
 
 What the drafts require and permit:
 
@@ -212,8 +190,8 @@ independent conformance oracle rather than a self-consistency check. The
 `server-name` vector (`NS2.EXAMPLE.NET.`) also confirms that names in a
 DelegInfo value are **not** downcased on the wire.
 
-The current DELEG records in the example zones under `zones/` predate the
-finalized Section 3 format and should be regenerated with this tool.
+Some of the current DELEG records in the example zones under `zones/` predate
+the finalized Section 3 format and should be regenerated with this tool.
 
 ## Compact Denial of Existence (CDOE) and DELEG occlusion
 
@@ -332,5 +310,4 @@ Delegation Type exists at the cut and reject the downgraded answer as bogus.
 The classic covering NSEC and the DNSKEY-ADT flag are the two halves of one
 mechanism: the NSEC supplies the proof material, and ADT (delext §6.2) is what
 *compels* a validator to inspect the bitmap and act on it. Substituting a black
-lie would drop the DELEG bit and silently defeat the detection — so the unusual
-construction is required, not incidental.
+lie would drop the DELEG bit and silently defeat the detection.

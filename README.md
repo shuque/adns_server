@@ -47,11 +47,8 @@ zone signer would let the program also serve pre-signed zones with DELEG.)
 
 For the full details of the implementation — type codes and EDNS signaling, the
 DE=1 and DE=0 referral/occlusion behavior, the DNSSEC proofs used, the relevant
-functions in the code, and the one area (Compact Denial of Existence
-interaction) where the implementation makes a choice not yet settled by the
-drafts — see **[DELEG.md](DELEG.md)**, which is the authoritative description of
-DELEG support in this program.
-
+functions in the code, and specific tweaks needed to support Compact Denial of
+Existence — see **[DELEG.md](DELEG.md)**.
 
 ### Pre-requisites
 
@@ -183,11 +180,10 @@ example.com. 7200 IN DNSKEY 257 3 13 oBQvOkuVPdp7Wes6EcWra7UlyI3u9EeM nRd79CSmq4
 ## Testing
 
 An automated test suite lives under `tests/pytest/`. It launches a private
-instance of the server on an ephemeral loopback port, drives it with real DNS
+instance of the server on an ephemeral loopback port, tests it with real DNS
 queries via dnspython, and asserts on the semantics of the responses (RCODE,
-flags, sections, Extended DNS Errors). For signed zones it also
-cryptographically validates the DNSSEC signatures and NSEC/NSEC3 proofs, rather
-than diffing volatile response text.
+flags, sections, Extended DNS Errors). For signed zones it also cryptographically
+validates the DNSSEC signatures and NSEC/NSEC3 proofs.
 
 The suite is self-contained: it manages the server process and uses its own
 purpose-built zones under `tests/pytest/test_zones/` (online signed at runtime),
@@ -209,6 +205,3 @@ python3 -m pytest tests/pytest -v
 Set `ADNS_TEST_KEEP_LOG=1` to print the server log on teardown when debugging a
 startup failure. See `tests/pytest/README.md` for details on the fixtures,
 assertion helpers, and test zones.
-
-The older `tests/dotests-*.sh` scripts remain for ad-hoc manual inspection of
-raw `dig` output.
