@@ -26,6 +26,8 @@ import time
 import enum
 import random
 import binascii
+from dataclasses import dataclass
+from typing import Optional
 import yaml
 import siphash
 import cachetools
@@ -93,31 +95,29 @@ class Finished(enum.Flag):
     FALSE = False
 
 
-class Preferences:
-    """Preferences"""
+@dataclass
+class Preferences:                            # pylint: disable=too-many-instance-attributes
+    """Server preferences (command line > config file > these defaults)."""
 
-    config = CONFIG_DEFAULT           # -c: Configuration file
-    debug = False                     # -d: Print debugging output
-    server = ''                       # -s: server listening address
-    server_af = None                  # server's address family if -s set
-    port = 53                         # -p: port
-    username = None                   # username to switch to (if root)
-    groupname = None                  # group to switch to (if root)
-    daemon = True                     # Become daemon (-f: foreground)
-    syslog_fac = syslog.LOG_DAEMON    # Syslog facility
-    syslog_pri = syslog.LOG_INFO      # Syslog priority
-    workdir = None                    # -w: Working directory to change to
-    workdir_cli = None                # -w value (wins over config on re-read)
-    pidfile = None                    # PID file
-    edns_udp_max = 1432               # -e: Max EDNS UDP payload we send
-    edns_udp_adv = 1232               # Max EDNS UDP payload we advertise
-    nsid = None                       # NSID option string
-    minimal_any = False               # Minimal ANY (RFC 8482)
-    cookie_secret = None              # Secret for DNS cookie generation
-    cache_stats = False               # Print online signature cache statistics
-
-    def __str__(self):
-        return "<Preferences object>"
+    config: str = CONFIG_DEFAULT           # -c: Configuration file
+    debug: bool = False                    # -d: Print debugging output
+    server: str = ''                       # -s: server listening address
+    server_af: Optional[str] = None        # server's address family if -s set
+    port: int = 53                         # -p: port
+    username: Optional[str] = None         # username to switch to (if root)
+    groupname: Optional[str] = None        # group to switch to (if root)
+    daemon: bool = True                    # Become daemon (-f: foreground)
+    syslog_fac: int = syslog.LOG_DAEMON    # Syslog facility
+    syslog_pri: int = syslog.LOG_INFO      # Syslog priority
+    workdir: Optional[str] = None          # -w: Working directory to change to
+    workdir_cli: Optional[str] = None      # -w value (wins over config re-read)
+    pidfile: Optional[str] = None          # PID file
+    edns_udp_max: int = 1432               # -e: Max EDNS UDP payload we send
+    edns_udp_adv: int = 1232               # Max EDNS UDP payload we advertise
+    nsid: Optional[bytes] = None           # NSID option string
+    minimal_any: bool = False              # Minimal ANY (RFC 8482)
+    cookie_secret: Optional[bytes] = None  # Secret for DNS cookie generation
+    cache_stats: bool = False              # Print online sig cache statistics
 
 
 def make_arg_parser():
@@ -1950,7 +1950,7 @@ def setup_server():
     PREFS.cookie_secret = binascii.hexlify(random.randbytes(8))
 
     if PREFS.daemon:
-        daemon(dirname=PREFS.workdir)
+        daemon(dirname=PREFS.workdir, syslog_fac=PREFS.syslog_fac)
     install_signal_handlers()
     log_message(f"info: {PROGNAME} version {__version__}: running")
 
