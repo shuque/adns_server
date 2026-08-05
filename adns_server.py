@@ -9,7 +9,7 @@ Author: Shumon Huque <shuque@gmail.com>
 
 import os
 import sys
-import getopt
+import argparse
 import pwd
 import grp
 import syslog
@@ -105,7 +105,8 @@ class Preferences:
     daemon = True                     # Become daemon (-f: foreground)
     syslog_fac = syslog.LOG_DAEMON    # Syslog facility
     syslog_pri = syslog.LOG_INFO      # Syslog priority
-    workdir = None                    # Working directory to change to
+    workdir = None                    # -w: Working directory to change to
+    workdir_cli = None                # -w value (wins over config on re-read)
     pidfile = None                    # PID file
     edns_udp_max = 1432               # -e: Max EDNS UDP payload we send
     edns_udp_adv = 1232               # Max EDNS UDP payload we advertise
@@ -118,36 +119,52 @@ class Preferences:
         return "<Preferences object>"
 
 
-def usage(msg=None):
-    """Print usage string and exit"""
+def make_arg_parser():
+    """Build the command-line argument parser."""
 
-    if msg is not None:
-        print(f"ERROR: {msg}\n")
+    parser = argparse.ArgumentParser(
+        prog=PROGNAME,
+        allow_abbrev=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=f"{PROGNAME} version {__version__} - "
+                    "An authoritative DNS server",
+        epilog="Note: a configuration file that minimally specifies the "
+               "zones to load must be present.")
 
-    print(f"""\
-{PROGNAME} version {__version__}
-Usage: {PROGNAME} [<Options>]
-
-Options:
-       -h:        Print usage string
-       -c file:   Configuration file (default '{CONFIG_DEFAULT}')
-       -d:        Turn on debugging
-       -p N:      Listen on port N (default 53)
-       -s A:      Bind to server address A (default wildcard address)
-       -u uname:  Drop privileges to UID of specified username
-                  (if server started running as root)
-       -g group:  Drop provileges to GID of specified groupname
-                  (if server started running as root)
-       -4:        Use IPv4 only
-       -6:        Use IPv6 only
-       -f:        Remain attached to foreground (default don't)
-       -e N:      Max EDNS bufsize in octets for responses we send out.
-                  (-e 0 will disable EDNS support)
-
-Note: a configuration file that minimally specifies the zones to load
-must be present.
-""")
-    sys.exit(1)
+    # Options that override a config-file setting are given no argparse
+    # default (they stay None when unsupplied) so the class-level Preferences
+    # defaults and any config-file values survive; process_args() copies an
+    # option onto Preferences only when it was actually given. Precedence is
+    # therefore: command line > config file > Preferences defaults.
+    parser.add_argument("--version", action="version",
+                        version=f"{PROGNAME} {__version__}")
+    parser.add_argument("-c", dest="config", metavar="FILE",
+                        help=f"Configuration file (default: {CONFIG_DEFAULT})")
+    parser.add_argument("-w", dest="workdir", metavar="DIR",
+                        help="Working directory (overrides config workdir)")
+    parser.add_argument("-d", dest="debug", action="store_true", default=None,
+                        help="Turn on debugging")
+    parser.add_argument("-p", dest="port", type=int, metavar="N",
+                        help="Listen on port N (default: 53)")
+    parser.add_argument("-s", dest="server", metavar="ADDR",
+                        help="Bind to server address (default: wildcard)")
+    parser.add_argument("-u", dest="username", metavar="USER",
+                        help="Drop privileges to UID of specified user "
+                             "(if started as root)")
+    parser.add_argument("-g", dest="groupname", metavar="GROUP",
+                        help="Drop privileges to GID of specified group "
+                             "(if started as root)")
+    af_group = parser.add_mutually_exclusive_group()
+    af_group.add_argument("-4", dest="server_af", action="store_const",
+                          const="IPv4", help="Use IPv4 only")
+    af_group.add_argument("-6", dest="server_af", action="store_const",
+                          const="IPv6", help="Use IPv6 only")
+    parser.add_argument("-f", dest="foreground", action="store_true",
+                        default=None, help="Remain attached to foreground")
+    parser.add_argument("-e", dest="edns_udp_max", type=int, metavar="N",
+                        help="Max EDNS bufsize in octets for responses we "
+                             "send out (-e 0 disables EDNS support)")
+    return parser
 
 
 def init_config(prefs, zonedict, only_zones=False):
@@ -162,7 +179,9 @@ def init_config(prefs, zonedict, only_zones=False):
                 if key == 'port':
                     prefs.port = val
                 elif key == 'workdir':
-                    prefs.workdir = val
+                    # A -w on the command line overrides the config value,
+                    # and must keep winning across SIGHUP config re-reads.
+                    prefs.workdir = prefs.workdir_cli or val
                 elif key == 'pidfile':
                     prefs.pidfile = val
                 elif key == 'edns':
@@ -244,46 +263,38 @@ def set_server_af(prefs, address):
 
 
 def process_args(prefs, zonedict, arguments):
-    """Process all command line arguments"""
+    """Process all command line arguments (command line overrides config)."""
 
-    try:
-        (options, args) = getopt.getopt(arguments, 'hc:dp:s:z:u:g:46fe:')
-    except getopt.GetoptError as error_info:
-        usage(str(error_info))
+    args = make_arg_parser().parse_args(arguments)
 
-    if args:
-        usage(f"No additional arguments allowed: {' '.join(args)}")
-
-    help_requested = [x for x in options if x[0] == '-h']
-    if help_requested:
-        usage()
-
-    config_supplied = [x for x in options if x[0] == '-c']
-    if config_supplied:
-        prefs.config = config_supplied[0][1]
-    print(f"Reading config from: {PREFS.config}")
+    # Config file and working directory must be settled before init_config(),
+    # which reads the config and resolves relative zone/key paths against
+    # workdir. workdir_cli records a -w so it keeps winning on SIGHUP re-reads.
+    if args.config is not None:
+        prefs.config = args.config
+    if args.workdir is not None:
+        prefs.workdir_cli = args.workdir
+        prefs.workdir = args.workdir
+    print(f"Reading config from: {prefs.config}")
     init_config(prefs, zonedict)
 
-    for (opt, optval) in options:
-        if opt == "-d":
-            prefs.debug = True
-        elif opt == "-p":
-            prefs.port = int(optval)
-        elif opt == "-s":
-            prefs.server = optval
-            set_server_af(PREFS, optval)
-        elif opt == "-u":
-            prefs.username = optval
-        elif opt == "-g":
-            prefs.groupname = optval
-        elif opt == "-4":
-            prefs.server_af = 'IPv4'
-        elif opt == "-6":
-            prefs.server_af = 'IPv6'
-        elif opt == "-f":
-            prefs.daemon = False
-        elif opt == "-e":
-            prefs.edns_udp_max = int(optval)
+    if args.debug:
+        prefs.debug = True
+    if args.port is not None:
+        prefs.port = args.port
+    if args.server is not None:
+        prefs.server = args.server
+        set_server_af(prefs, args.server)
+    if args.username is not None:
+        prefs.username = args.username
+    if args.groupname is not None:
+        prefs.groupname = args.groupname
+    if args.server_af is not None:      # -4/-6 override any -s-derived family
+        prefs.server_af = args.server_af
+    if args.foreground:
+        prefs.daemon = False
+    if args.edns_udp_max is not None:
+        prefs.edns_udp_max = args.edns_udp_max
 
 
 def log_message(msg):
