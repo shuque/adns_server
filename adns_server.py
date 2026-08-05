@@ -9,6 +9,7 @@ Author: Shumon Huque <shuque@gmail.com>
 
 import os
 import sys
+import copy
 import argparse
 import pwd
 import grp
@@ -1007,39 +1008,63 @@ class DNSresponse:
         self.response.additional = []
         return self.response.to_wire()
 
-    def add_rrset(self, zobj, section, rrset, wildcard=None, authoritative=True):
-        """Add RRset to section, fetching RRsigs if needed"""
+    def add_rrset(self, zobj, section, rrset, wildcard=None, authoritative=True,
+                  ttl=None):
+        """
+        Add RRset to section, fetching RRsigs if needed.
+
+        The ttl= parameter is for handling SOA in negative responses correctly.
+        If ttl is not None, the RRset and its covering RRSIG are emitted with
+        that wire TTL. For SOA additions in negative responses, this function is
+        called with the ttl set to the SOA min TTL value. Per RFC 2308, the SOA
+        record's TTL is then set to this value. For signed zones, per RFC 4034,
+        Section 3, the SOA RRSIG RR's TTL is matched to this value (i.e. to the
+        covering RRset's TTL). The RRset is signed (online) or its RRSIG fetched
+        (precomputed) at the zone TTL first, so the RRSIG Original TTL field is
+        unaffected; only the wire TTLs are lowered afterward.
+        """
 
         if rrset in section:
             return
         section.append(rrset)
 
-        if not authoritative or not self.dnssec_ok():
-            return
-
-        if zobj.online_signing():
-            h_rrset = HashableRRset(rrset)
-            section.append(sign_rrset(zobj, h_rrset))
-            if PREFS.cache_stats:
-                log_message(f"sigcache: {sign_rrset.cache_info()}")
-            return
-
-        if zobj.dnssec:
-            rrname = wildcard if wildcard else rrset.name
-            rdataset = zobj.get_rdataset(rrname,
-                                         dns.rdatatype.RRSIG, covers=rrset.rdtype)
-            if rdataset:
-                rrsig = dns.rrset.RRset(rrset.name,
-                                        dns.rdataclass.IN, rdataset.rdtype)
-                rrsig.update(rdataset)
+        if authoritative and self.dnssec_ok():
+            rrsig = None
+            if zobj.online_signing():
+                rrsig = sign_rrset(zobj, HashableRRset(rrset))
+                if PREFS.cache_stats:
+                    log_message(f"sigcache: {sign_rrset.cache_info()}")
+            elif zobj.dnssec:
+                rrname = wildcard if wildcard else rrset.name
+                rdataset = zobj.get_rdataset(rrname, dns.rdatatype.RRSIG,
+                                             covers=rrset.rdtype)
+                if rdataset:
+                    rrsig = dns.rrset.RRset(rrset.name,
+                                            dns.rdataclass.IN, rdataset.rdtype)
+                    rrsig.update(rdataset)
+            if rrsig is not None:
+                if ttl is not None:
+                    # The online RRSIG is a shared, cached object (the cache
+                    # key ignores TTL); copy before altering its wire TTL.
+                    rrsig = copy.copy(rrsig)
+                    rrsig.ttl = ttl
                 section.append(rrsig)
 
+        if ttl is not None:
+            # After signing, so the RRSIG Original TTL field stays at the
+            # zone TTL while the emitted wire TTL is the reduced value.
+            rrset.ttl = ttl
+
     def add_soa(self, zobj):
-        """Add SOA record to authority for negative responses"""
+        """
+        Add SOA record to authority for negative responses. Obtain the
+        zone's SOA record, and pass it to add_rrset() along with the 
+        SOA min TTL value.
+        """
 
         soa_rrset = zobj.get_rrset(zobj.origin, dns.rdatatype.SOA)
-        self.add_rrset(zobj, self.response.authority, soa_rrset)
-        soa_rrset.ttl = zobj.soa_min_ttl
+        self.add_rrset(zobj, self.response.authority, soa_rrset,
+                       ttl=zobj.soa_min_ttl)
 
     def nxdomain(self, zobj, sname):
         """Generate NXDOMAIN response"""
