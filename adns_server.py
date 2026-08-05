@@ -458,17 +458,19 @@ def send_socket(sock, message):
 
 
 def recv_socket(sock, num_octets):
-    """Read and return num_octets of data from a connected socket"""
-    response = ""
-    octets_read = 0
-    while octets_read < num_octets:
-        chunk = sock.recv(num_octets - octets_read)
-        chunklen = len(chunk)
-        if chunklen == 0:
-            return ""
-        octets_read += chunklen
-        response += chunk
-    return response
+    """Read and return exactly num_octets of data from a connected socket.
+
+    TCP is a byte stream, so a single recv() may return fewer octets than
+    requested (and may split the 2-octet length prefix from the message
+    body across segments). Loop until num_octets have been read. Returns
+    None if the peer closes the connection before that many octets arrive."""
+    data = bytearray()
+    while len(data) < num_octets:
+        chunk = sock.recv(num_octets - len(data))
+        if not chunk:
+            return None
+        data.extend(chunk)
+    return bytes(data)
 
 
 def load_private_key(keyfile):
@@ -1889,15 +1891,30 @@ def handle_connection_udp(sock, rbufsize=2048):
     handle_query(query, sock)
 
 
-def handle_connection_tcp(sock, addr, rbufsize=2048):
-    """Handle TCP connection"""
+def handle_connection_tcp(sock, addr):
+    """Handle TCP connection
 
-    data = sock.recv(rbufsize)
+    Read one length-prefixed DNS message (RFC 1035 4.2.2): a 2-octet length
+    field followed by that many octets of message. Persistent connections
+    (multiple queries per connection, RFC 7766) are not yet supported -- we
+    read one message and close."""
+
     cliaddr, cliport = addr[0:2]
+    prefix = recv_socket(sock, 2)
+    if prefix is None:
+        sock.close()
+        return
+    msg_len, = struct.unpack('!H', prefix)
+    body = recv_socket(sock, msg_len)
+    if body is None:
+        log_message(f"error: TCP from ({cliaddr}, {cliport}): connection "
+                    f"closed mid-message (expected {msg_len} octets)")
+        sock.close()
+        return
     if PREFS.debug:
         log_message(f"connect: TCP from ({cliaddr}, {cliport}) "
-                    f"msgsize={len(data)}")
-    query = DNSquery(data, cliaddr=cliaddr, cliport=cliport, tcp=True)
+                    f"msgsize={msg_len}")
+    query = DNSquery(prefix + body, cliaddr=cliaddr, cliport=cliport, tcp=True)
     handle_query(query, sock)
     sock.close()
 
