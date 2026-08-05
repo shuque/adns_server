@@ -26,6 +26,7 @@ import time
 import enum
 import random
 import binascii
+import traceback
 from dataclasses import dataclass
 from typing import Optional
 import yaml
@@ -1879,16 +1880,42 @@ def handle_query(query, sock):
                     (query.cliaddr, query.cliport))
 
 
+def send_servfail(query, sock):
+    """Best-effort SERVFAIL reply after an unhandled handler exception.
+
+    Built directly from the query (not via DNSresponse, which is what failed)
+    and guarded so it can never itself raise out of the exception handler.
+    A no-op if the query never parsed (no question to respond to)."""
+    if query is None or not query.message:
+        return
+    try:
+        resp = dns.message.make_response(query.message)
+        resp.set_rcode(dns.rcode.SERVFAIL)
+        wire = resp.to_wire()
+        if query.tcp:
+            send_socket(sock, struct.pack('!H', len(wire)) + wire)
+        else:
+            sock.sendto(wire, (query.cliaddr, query.cliport))
+    except Exception as exc_info:      # pylint: disable=broad-exception-caught
+        log_message(f"error: failed to send SERVFAIL: {exc_info}")
+
+
 def handle_connection_udp(sock, rbufsize=2048):
     """Handle UDP connection"""
 
-    data, addrport = sock.recvfrom(rbufsize)
-    cliaddr, cliport = addrport[0:2]
-    if PREFS.debug:
-        log_message(f"connect: UDP from ({cliaddr}, {cliport}) "
-                    f"msgsize={len(data)}")
-    query = DNSquery(data, cliaddr=cliaddr, cliport=cliport)
-    handle_query(query, sock)
+    query = None
+    try:
+        data, addrport = sock.recvfrom(rbufsize)
+        cliaddr, cliport = addrport[0:2]
+        if PREFS.debug:
+            log_message(f"connect: UDP from ({cliaddr}, {cliport}) "
+                        f"msgsize={len(data)}")
+        query = DNSquery(data, cliaddr=cliaddr, cliport=cliport)
+        handle_query(query, sock)
+    except Exception as exc_info:      # pylint: disable=broad-exception-caught
+        log_message(f"error: unhandled exception in UDP handler: "
+                    f"{exc_info}\n{traceback.format_exc()}")
+        send_servfail(query, sock)
 
 
 def handle_connection_tcp(sock, addr):
@@ -1899,24 +1926,30 @@ def handle_connection_tcp(sock, addr):
     (multiple queries per connection, RFC 7766) are not yet supported -- we
     read one message and close."""
 
-    cliaddr, cliport = addr[0:2]
-    prefix = recv_socket(sock, 2)
-    if prefix is None:
+    query = None
+    try:  # pylint: disable=too-many-try-statements
+        cliaddr, cliport = addr[0:2]
+        prefix = recv_socket(sock, 2)
+        if prefix is None:
+            return
+        msg_len, = struct.unpack('!H', prefix)
+        body = recv_socket(sock, msg_len)
+        if body is None:
+            log_message(f"error: TCP from ({cliaddr}, {cliport}): connection "
+                        f"closed mid-message (expected {msg_len} octets)")
+            return
+        if PREFS.debug:
+            log_message(f"connect: TCP from ({cliaddr}, {cliport}) "
+                        f"msgsize={msg_len}")
+        query = DNSquery(prefix + body, cliaddr=cliaddr, cliport=cliport,
+                         tcp=True)
+        handle_query(query, sock)
+    except Exception as exc_info:      # pylint: disable=broad-exception-caught
+        log_message(f"error: unhandled exception in TCP handler: "
+                    f"{exc_info}\n{traceback.format_exc()}")
+        send_servfail(query, sock)
+    finally:
         sock.close()
-        return
-    msg_len, = struct.unpack('!H', prefix)
-    body = recv_socket(sock, msg_len)
-    if body is None:
-        log_message(f"error: TCP from ({cliaddr}, {cliport}): connection "
-                    f"closed mid-message (expected {msg_len} octets)")
-        sock.close()
-        return
-    if PREFS.debug:
-        log_message(f"connect: TCP from ({cliaddr}, {cliport}) "
-                    f"msgsize={msg_len}")
-    query = DNSquery(prefix + body, cliaddr=cliaddr, cliport=cliport, tcp=True)
-    handle_query(query, sock)
-    sock.close()
 
 
 def setup_sockets(family, server, port):
