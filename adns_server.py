@@ -1723,7 +1723,7 @@ class DNSresponse:
             return False, None
         if time_delta < COOKIE_RECALCULATE_TIME:
             return True, cookiedata
-        log_message("Re-calculating cookie for {self.query.cliaddr}")
+        log_message(f"Re-calculating cookie for {self.query.cliaddr}")
         newcookie = clientcookie + \
             self.calculate_server_cookie(clientcookie,
                                          b'\x00\x00\x00',
