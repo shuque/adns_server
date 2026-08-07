@@ -475,7 +475,6 @@ def load_private_key(keyfile):
     """
     with open(keyfile, 'rb') as fkeyfile:
         return load_pem_private_key(fkeyfile.read(), password=None)
-    return None
 
 
 class HashableRRset:
@@ -876,11 +875,9 @@ class DNSquery:
 
     def __init__(self, data, cliaddr, cliport, tcp=False):
 
-        self.malformed = False
         self.cliaddr = cliaddr
         self.cliport = cliport
         self.headeronly = False
-        self.malformed = None
 
         self.tcp = tcp
         if self.tcp:
@@ -895,7 +892,6 @@ class DNSquery:
         except dns.exception.DNSException as exc_info:
             log_message(f"error: can't parse query: {type(exc_info)}: {exc_info}")
             self.message = None
-            self.malformed = True
         else:
             if not self.message.question:
                 self.headeronly = True
@@ -1352,7 +1348,6 @@ class DNSresponse:
         # NODATA - add SOA
         self.is_nodata = True
         self.nodata(zobj, sname, wildcard)
-        return
 
     def do_referral(self, zobj, sname, rdataset):
         """Generate referral response to child zone"""
@@ -1576,7 +1571,6 @@ class DNSresponse:
                                                   cname_target)
         rdataset.add(cname_rdata)
         self.process_cname(zobj, qname, qname, stype, rdataset)
-        return
 
     def process_name(self, zobj, qname, sname, stype):
         """
