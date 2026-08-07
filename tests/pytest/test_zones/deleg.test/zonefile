@@ -24,6 +24,18 @@ exact.wild	IN	A	192.0.2.21
 ;;
 host.deep.ent	IN	A	192.0.2.30
 ;;
+;; CNAME (in-zone target), wildcard CNAME, and DNAME -- exercise the
+;; process_cname / process_dname answer paths.
+;;
+alias		IN	CNAME	www.deleg.test.
+*.wc		IN	CNAME	www.deleg.test.
+;;
+;; DNAME redirecting the "old" subtree to "new"; a query below the owner
+;; yields DNAME + synthesized CNAME + the target's answer.
+;;
+old		IN	DNAME	new.deleg.test.
+host.new	IN	A	192.0.2.40
+;;
 ;; Delegation matrix. DELEG rdata is opaque to the server (returned as-is);
 ;; the shapes below exercise every referral / occlusion code path.
 ;;
