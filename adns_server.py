@@ -1955,28 +1955,27 @@ def handle_connection_tcp(sock, addr):
 
 
 def setup_sockets(family, server, port):
-    """Setup sockets for connection types and address families we handle"""
+    """Setup sockets for connection types and address families we handle.
 
-    fd_read = []
-    dispatch = {} # dict: socket -> (handler, is_tcp)
+    Returns a dispatch dict keyed by each socket's fileno -> (sock, handler,
+    is_tcp). Keying on the fileno lets the event loop look a ready descriptor
+    up directly (select() returns filenos), and lets select() consume the
+    dict's keys as its read list."""
+
+    dispatch = {}   # dict: fileno -> (sock, handler, is_tcp)
+
+    def register(sock, handler, is_tcp):
+        dispatch[sock.fileno()] = (sock, handler, is_tcp)
 
     if family is None or family == 'IPv4':
-        s_udp4 = udp4socket(server, port)
-        fd_read.append(s_udp4.fileno())
-        dispatch[s_udp4] = (handle_connection_udp, False)
-        s_tcp4 = tcp4socket(server, port)
-        fd_read.append(s_tcp4.fileno())
-        dispatch[s_tcp4] = (handle_connection_tcp, True)
+        register(udp4socket(server, port), handle_connection_udp, False)
+        register(tcp4socket(server, port), handle_connection_tcp, True)
 
     if family is None or family == 'IPv6':
-        s_udp6 = udp6socket(server, port)
-        fd_read.append(s_udp6.fileno())
-        dispatch[s_udp6] = (handle_connection_udp, False)
-        s_tcp6 = tcp6socket(server, port)
-        fd_read.append(s_tcp6.fileno())
-        dispatch[s_tcp6] = (handle_connection_tcp, True)
+        register(udp6socket(server, port), handle_connection_udp, False)
+        register(tcp6socket(server, port), handle_connection_tcp, True)
 
-    return fd_read, dispatch
+    return dispatch
 
 
 def setup_server():
@@ -1990,8 +1989,8 @@ def setup_server():
     log_message(f"info: {PROGNAME} version {__version__}: running")
 
     try:
-        fd_read, dispatch = setup_sockets(PREFS.server_af,
-                                          PREFS.server, PREFS.port)
+        dispatch = setup_sockets(PREFS.server_af,
+                                 PREFS.server, PREFS.port)
     except PermissionError as exc_info:
         log_fatal(f"Error setting up sockets: {exc_info}")
 
@@ -1999,30 +1998,27 @@ def setup_server():
         drop_privs(PREFS.username, PREFS.groupname)
 
     log_message(f"info: Listening on UDP and TCP port {PREFS.port}")
-    return fd_read, dispatch
+    return dispatch
 
 
-def run_event_loop(fd_read, dispatch):
+def run_event_loop(dispatch):
     """Run main event loop ..."""
 
     while True:
         try:
-            (ready_r, _, _) = select.select(fd_read, [], [], 5)
+            (ready_r, _, _) = select.select(dispatch, [], [], 5)
         except OSError as exc_info:
             log_fatal(f"error: from select(): {exc_info}")
         if not ready_r:
             continue
 
         for file_desc in ready_r:
-            for (sock, (handler, is_tcp)) in dispatch.items():
-                if file_desc == sock.fileno():
-                    if is_tcp:
-                        conn, addr = sock.accept()
-                        threading.Thread(target=handler,
-                                         args=(conn, addr)).start()
-                    else:
-                        threading.Thread(target=handler,
-                                         args=(sock,)).start()
+            sock, handler, is_tcp = dispatch[file_desc]
+            if is_tcp:
+                conn, addr = sock.accept()
+                threading.Thread(target=handler, args=(conn, addr)).start()
+            else:
+                threading.Thread(target=handler, args=(sock,)).start()
 
 
 if __name__ == '__main__':
@@ -2031,5 +2027,5 @@ if __name__ == '__main__':
     PREFS = Preferences()
     ZONEDICT = ZoneDict()
     process_args(PREFS, ZONEDICT, sys.argv[1:])
-    FD_READ, DISPATCH = setup_server()
-    run_event_loop(FD_READ, DISPATCH)
+    DISPATCH = setup_server()
+    run_event_loop(DISPATCH)
