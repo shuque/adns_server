@@ -90,11 +90,6 @@ class EDECode(enum.IntEnum):
     # IANA-allocated INFO-CODE 34 (deleg-10 5.2.2.1)
     NEW_DELEGATION_ONLY = 34
 
-class Finished(enum.Flag):
-    """Finished Boolean enum"""
-    TRUE = True
-    FALSE = False
-
 
 @dataclass
 class Preferences:                            # pylint: disable=too-many-instance-attributes
@@ -1591,6 +1586,13 @@ class DNSresponse:
         otherwise we look for a DNAME or delegation. Otherwise, we indicate
         that the search hasn't finished, and the caller will append the next
         label towards the qname and call us again.
+
+        Returns a bool signalling whether the descent down the DNS tree is
+        complete: True means this step produced a terminal outcome and the
+        caller should stop -- an answer or NODATA (find_rrtype), a wildcard
+        match, a DNAME redirection, a referral, or a denial (NXDOMAIN /
+        occlusion). False means sname is an existing interior node short of
+        the qname, so the caller appends the next label and calls again.
         """
 
         node = zobj.get_node(sname)
@@ -1601,15 +1603,15 @@ class DNSresponse:
                 self.find_rrtype(zobj, wildcard_name, stype, wildcard=sname)
                 if not zobj.online_signing():
                     self.wildcard_no_closer_match(zobj, wildcard_name, sname)
-                return Finished.TRUE
+                return True
             self.nxdomain(zobj, sname)
-            return Finished.TRUE
+            return True
 
         # Look for DNAME
         dname_rdataset = zobj.get_rdataset(sname, dns.rdatatype.DNAME)
         if dname_rdataset:
             self.process_dname(zobj, qname, sname, stype, dname_rdataset)
-            return Finished.TRUE
+            return True
 
         # Look for delegation. A delegation point has an NS RRset and/or,
         # for DELEG-enabled zones, a DELEG RRset. A DELEG-aware client (DE=1)
@@ -1626,24 +1628,24 @@ class DNSresponse:
                            (stype not in AUTH_IN_PARENT_RRTYPES)):
                 if de_aware:
                     self.do_referral(zobj, sname, ns_rdataset)
-                    return Finished.TRUE
+                    return True
                 if ns_rdataset:
                     # DE=0 with NS present: NS occludes DELEG -> legacy referral
                     self.do_referral(zobj, sname, ns_rdataset)
-                    return Finished.TRUE
+                    return True
                 # DE=0, DELEG-only cut: namespace is invisible to this client
                 self.add_new_delegation_only_ede()
                 if qname != sname:
                     self.occluded_nxdomain(zobj, qname, sname)
-                    return Finished.TRUE
+                    return True
                 # qname == sname: fall through to answer DELEG/DS as ordinary
                 # data or return NODATA (deleg-10 5.2.2.1 / 5.2.2.2).
 
         if sname == qname:
             self.find_rrtype(zobj, sname, stype)
-            return Finished.TRUE
+            return True
 
-        return Finished.FALSE
+        return False
 
     def find_answer_in_zone(self, zobj, qname, qtype):
         """
