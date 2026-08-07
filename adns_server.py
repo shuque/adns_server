@@ -69,6 +69,15 @@ CACHE_TTL = RRSIG_LIFETIME - 2 * (RRSIG_INCEPTION_OFFSET)
 COOKIE_TIMESTAMP_DRIFT = 86400        # Allowed DNS Cookie timestamp drift (secs)
 COOKIE_RECALCULATE_TIME = 21600
 
+# Message size limits (octets)
+UDP_MAXSIZE_NOEDNS = 512              # RFC 1035 UDP payload limit without EDNS
+TCP_MAXSIZE = 65533                   # 65535 max DNS message - 2-octet TCP length prefix
+
+# QTYPE / Meta-TYPE range (RFC 6895 section 3.1): 128-255 are Q and Meta
+# types. 255 (ANY) is handled separately, so the meta-type test excludes it.
+METATYPE_MIN = 128
+METATYPE_MAX = 254
+
 class RRtype(enum.IntEnum):
     """Resource Record types"""
     NXNAME = 128
@@ -751,7 +760,7 @@ def nsec3hash(name, algnum, wire_salt, iterations, binary_out=False):
 
 def query_meta_type(qtype):
     """Is given query type a meta type (except ANY)?"""
-    return 128 <= qtype <= 254
+    return METATYPE_MIN <= qtype <= METATYPE_MAX
 
 
 def compact_answer_ok(message):
@@ -983,9 +992,9 @@ class DNSresponse:
         """Compute maximum permissible DNS response size"""
 
         if self.query.tcp:
-            return 65533
+            return TCP_MAXSIZE
         if (PREFS.edns_udp_max == 0) or (self.query.message.edns == -1):
-            return 512
+            return UDP_MAXSIZE_NOEDNS
         return min(self.query.message.payload, PREFS.edns_udp_max)
 
     def truncate(self):
