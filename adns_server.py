@@ -532,19 +532,6 @@ class Zone(dns.zone.Zone):
     node_factory = dns.node.Node
     map_factory = SortedDict
 
-    __slots__ = [
-        'ent_nodes',
-        'dnssec',
-        'privatekey',
-        'signing_dnskey',
-        'keytag',
-        'nsec3param',
-        'compact_denial',
-        'deleg_enabled',
-        'udp_truncate_all',
-        'require_server_cookie',
-    ]
-
     def __init__(self, origin, rdclass=dns.rdataclass.IN, relativize=False):
         """Initialize a zone object."""
 
