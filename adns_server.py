@@ -666,10 +666,7 @@ class Zone(dns.zone.Zone):
             rdataset = node.get_rdataset(dns.rdataclass.IN,
                                          dns.rdatatype.NSEC3)
             if rdataset:
-                rrset = dns.rrset.RRset(name, dns.rdataclass.IN,
-                                        rdataset.rdtype)
-                rrset.update(rdataset)
-                return rrset
+                return rrset_from_rdataset(name, rdataset)
             search_index -= 1
             if search_index < 0:
                 break
@@ -778,6 +775,17 @@ def compact_answer_ok(message):
 def deleg_ext_ok(message):
     """Does DNS message have the EDNS(0) DE (Delegation Extensions) flag set?"""
     return message.ednsflags & EdnsFlag.DELEG_EXT_OK == EdnsFlag.DELEG_EXT_OK
+
+
+def rrset_from_rdataset(name, rdataset):
+    """Build an RRset with the given owner name from an existing rdataset.
+
+    The RRset's type is taken from the rdataset (rdataset.rdtype), so callers
+    can't accidentally pair a name/type with a mismatched rdataset. Replaces
+    the repeated RRset(name, IN, type); rrset.update(rdataset) idiom."""
+    rrset = dns.rrset.RRset(name, dns.rdataclass.IN, rdataset.rdtype)
+    rrset.update(rdataset)
+    return rrset
 
 
 @cachetools.cached(cache=cachetools.TTLCache(maxsize=CACHE_SIZE,
@@ -1033,9 +1041,7 @@ class DNSresponse:
                 rdataset = zobj.get_rdataset(rrname, dns.rdatatype.RRSIG,
                                              covers=rrset.rdtype)
                 if rdataset:
-                    rrsig = dns.rrset.RRset(rrset.name,
-                                            dns.rdataclass.IN, rdataset.rdtype)
-                    rrsig.update(rdataset)
+                    rrsig = rrset_from_rdataset(rrset.name, rdataset)
             if rrsig is not None:
                 if ttl is not None:
                     # The online RRSIG is a shared, cached object (the cache
@@ -1299,18 +1305,15 @@ class DNSresponse:
             for rdataset in rdatasets:
                 if rdataset.rdtype == dns.rdatatype.RRSIG:
                     continue
-                rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN,
-                                        rdataset.rdtype)
-                rrset.update(rdataset)
-                self.add_rrset(zobj, self.response.answer, rrset)
+                self.add_rrset(zobj, self.response.answer,
+                               rrset_from_rdataset(rrname, rdataset))
                 return
 
         for rdataset in rdatasets:
             if rdataset.rdtype == dns.rdatatype.RRSIG:
                 continue
-            rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN, rdataset.rdtype)
-            rrset.update(rdataset)
-            self.add_rrset(zobj, self.response.answer, rrset)
+            self.add_rrset(zobj, self.response.answer,
+                           rrset_from_rdataset(rrname, rdataset))
 
     def find_rrtype(self, zobj, sname, stype, wildcard=None):
         """Find RRtype for given name, with CNAME processing if needed"""
@@ -1339,9 +1342,8 @@ class DNSresponse:
         # Look for requested RRtype
         rdataset = zobj.get_rdataset(sname, stype)
         if rdataset:
-            rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN, stype)
-            rrset.update(rdataset)
-            self.add_rrset(zobj, self.response.answer, rrset,
+            self.add_rrset(zobj, self.response.answer,
+                           rrset_from_rdataset(rrname, rdataset),
                            wildcard=sname if wildcard else None)
             return
 
@@ -1362,8 +1364,7 @@ class DNSresponse:
     def do_referral_traditional(self, zobj, sname, rdataset):
         """Generate traditional referral response (NS + glue + DS/NSEC)"""
 
-        ns_rrset = dns.rrset.RRset(sname, dns.rdataclass.IN, dns.rdatatype.NS)
-        ns_rrset.update(rdataset)
+        ns_rrset = rrset_from_rdataset(sname, rdataset)
         self.add_rrset(zobj, self.response.authority, ns_rrset, authoritative=False)
         self.get_glue(zobj, sname, rdataset)
 
@@ -1413,10 +1414,9 @@ class DNSresponse:
             for rrtype in (dns.rdatatype.A, dns.rdatatype.AAAA):
                 rdataset = zobj.get_rdataset(rdata.target, rrtype)
                 if rdataset:
-                    rrset = dns.rrset.RRset(rdata.target,
-                                            dns.rdataclass.IN, rrtype)
-                    rrset.update(rdataset)
-                    self.add_rrset(zobj, self.response.additional, rrset, authoritative=False)
+                    self.add_rrset(zobj, self.response.additional,
+                                   rrset_from_rdataset(rdata.target, rdataset),
+                                   authoritative=False)
 
     def add_nsec_matching(self, zobj, sname):
         """Add NSEC or NSEC3 record matching name"""
@@ -1536,10 +1536,8 @@ class DNSresponse:
             self.response.set_rcode(dns.rcode.SERVFAIL)
             return
         self.cname_owner_list.append(sname)
-        rrset = dns.rrset.RRset(rrname, dns.rdataclass.IN,
-                                dns.rdatatype.CNAME)
-        rrset.update(cname_rdataset)
-        self.add_rrset(zobj, self.response.answer, rrset,
+        self.add_rrset(zobj, self.response.answer,
+                       rrset_from_rdataset(rrname, cname_rdataset),
                        wildcard=sname if wildcard else None)
         self.find_answer(cname_rdataset[0].target, stype)
 
@@ -1551,9 +1549,8 @@ class DNSresponse:
             self.response.set_rcode(dns.rcode.SERVFAIL)
             return
         self.dname_owner_list.append(sname)
-        rrset = dns.rrset.RRset(sname, dns.rdataclass.IN, dns.rdatatype.DNAME)
-        rrset.update(dname_rdataset)
-        self.add_rrset(zobj, self.response.answer, rrset)
+        self.add_rrset(zobj, self.response.answer,
+                       rrset_from_rdataset(sname, dname_rdataset))
 
         dname_target = dname_rdataset[0].target
         try:
