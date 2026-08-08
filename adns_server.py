@@ -53,7 +53,7 @@ from sortedcontainers import SortedDict
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
-__version__ = '0.8.0'
+__version__ = '0.9.0'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'
@@ -76,6 +76,9 @@ TCP_MAXSIZE = 65533                   # 65535 max DNS message - 2-octet TCP leng
 
 # Timeouts (seconds)
 TCP_TIMEOUT = 5                       # Deadline to read one TCP query (RFC 7766 §8)
+
+# Concurrency
+MAX_WORKERS = 256                     # Cap on concurrent query worker threads
 
 # QTYPE / Meta-TYPE range (RFC 6895 section 3.1): 128-255 are Q and Meta
 # types. 255 (ANY) is handled separately, so the meta-type test excludes it.
@@ -124,6 +127,7 @@ class Preferences:                            # pylint: disable=too-many-instanc
     edns_udp_max: int = 1432               # -e: Max EDNS UDP payload we send
     edns_udp_adv: int = 1232               # Max EDNS UDP payload we advertise
     tcp_timeout: int = TCP_TIMEOUT         # Deadline to read one TCP query (secs)
+    max_workers: int = MAX_WORKERS         # Cap on concurrent worker threads
     nsid: Optional[bytes] = None           # NSID option string
     minimal_any: bool = False              # Minimal ANY (RFC 8482)
     cache_stats: bool = False              # Print online sig cache statistics
@@ -216,6 +220,8 @@ def init_config(prefs, zonedict, only_zones=False):
                     prefs.edns_udp_max = val
                 elif key == 'tcp_timeout':
                     prefs.tcp_timeout = val
+                elif key == 'max_workers':
+                    prefs.max_workers = val
                 elif key == 'user':
                     prefs.username = val
                 elif key == 'group':
@@ -360,6 +366,34 @@ def log_fatal(msg):
     """log fatal error message and bail out"""
     log_message(msg)
     sys.exit(1)
+
+
+class RateLimitedLog:
+    """Emit a message at most once per interval, with a suppressed-since count.
+
+    Used for events that can recur at attacker-controlled rates (e.g. request
+    shedding under the worker cap) so the log itself can't become an
+    amplification/DoS vector."""
+
+    def __init__(self, msg, interval=1.0):
+        self.msg = msg
+        self.interval = interval
+        self.lock = threading.Lock()
+        self.last = 0.0
+        self.suppressed = 0
+
+    def log(self):
+        """Log now if the interval has elapsed, else just count the event."""
+        with self.lock:
+            now = time.monotonic()
+            if now - self.last < self.interval:
+                self.suppressed += 1
+                return
+            extra = f" ({self.suppressed} more since last message)" \
+                if self.suppressed else ""
+            self.last = now
+            self.suppressed = 0
+        log_message(f"warning: {self.msg}{extra}")
 
 
 def handle_sigterm(signum, frame):
@@ -2091,10 +2125,39 @@ def setup_server(ctx):
     log_message(f"info: Listening on UDP and TCP port {prefs.port}")
 
 
+def spawn_worker(semaphore, handler, args):
+    """Start a daemon worker thread that releases the concurrency slot on exit.
+
+    daemon=True so a worker still running at shutdown (e.g. a TCP thread blocked
+    in recv() on a client that hasn't finished its message) doesn't hold up
+    interpreter exit. Non-daemon threads are joined by threading._shutdown()
+    before the process exits, which otherwise makes SIGTERM hang until a second
+    signal and prevents the atexit pidfile cleanup from ever running.
+
+    The caller has already acquired one semaphore slot; the wrapper releases it
+    in a finally so the slot is returned however the handler exits."""
+    def run():
+        try:
+            handler(*args)
+        finally:
+            semaphore.release()
+    threading.Thread(target=run, daemon=True).start()
+
+
 def run_event_loop(ctx):
-    """Run main event loop ..."""
+    """Run main event loop ...
+
+    A BoundedSemaphore caps the number of concurrent worker threads
+    (prefs.max_workers). When the cap is hit we shed the pending event rather
+    than block the accept loop: for UDP we read and drop the datagram, for TCP
+    we accept and immediately close. Both consume the readable event so select()
+    doesn't just re-report the same fd and spin. This bounds resource use under
+    a flood regardless of source -- it is NOT a defense against spoofed-source /
+    DDoS / amplification attacks (out of scope for a prototype server)."""
 
     dispatch = ctx.dispatch
+    workers = threading.BoundedSemaphore(ctx.prefs.max_workers)
+    shed = RateLimitedLog("worker cap reached; shedding requests")
     while True:
         try:
             (ready_r, _, _) = select.select(dispatch, [], [], 5)
@@ -2105,19 +2168,26 @@ def run_event_loop(ctx):
 
         for file_desc in ready_r:
             sock, handler, is_tcp = dispatch[file_desc]
-            # daemon=True so a worker still running at shutdown (e.g. a TCP
-            # thread blocked in recv() on a client that hasn't finished its
-            # message) doesn't hold up interpreter exit. Non-daemon threads are
-            # joined by threading._shutdown() before the process exits, which
-            # otherwise makes SIGTERM hang until a second signal and prevents
-            # the atexit pidfile cleanup from ever running.
+            # Not a `with`: the slot is released from the worker thread (or the
+            # shed path just below), so acquire/release don't nest in a block.
+            got_slot = workers.acquire(  # pylint: disable=consider-using-with
+                blocking=False)
             if is_tcp:
                 conn, addr = sock.accept()
-                threading.Thread(target=handler, args=(conn, addr, ctx),
-                                 daemon=True).start()
+                if got_slot:
+                    spawn_worker(workers, handler, (conn, addr, ctx))
+                    continue
+                conn.close()                # shed: drain the accept queue
+            elif got_slot:
+                spawn_worker(workers, handler, (sock, ctx))
+                continue
             else:
-                threading.Thread(target=handler, args=(sock, ctx),
-                                 daemon=True).start()
+                # shed: drain the datagram so select() doesn't re-fire
+                try:
+                    sock.recvfrom(2048)
+                except OSError:
+                    pass
+            shed.log()
 
 
 if __name__ == '__main__':
