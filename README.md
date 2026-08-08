@@ -75,7 +75,7 @@ pip3 install git+https://github.com/shuque/adns_server.git
 ```
 
 To install a specific released version, append the tag, e.g.
-`...adns_server.git@v0.7.6`.
+`...adns_server.git@v0.7.7`.
 
 ### Usage
 

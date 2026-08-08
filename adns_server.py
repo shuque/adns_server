@@ -13,6 +13,7 @@ import copy
 import argparse
 import pwd
 import grp
+import resource
 import syslog
 import struct
 import socket
@@ -52,7 +53,7 @@ from sortedcontainers import SortedDict
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
-__version__ = '0.7.6'
+__version__ = '0.7.7'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'
@@ -401,6 +402,25 @@ def remove_pidfile(pidfile):
         log_message(f"warning: could not remove pidfile {pidfile}: {exc_info}")
 
 
+def close_inherited_fds():
+    """Close inherited descriptors (fd 3+) so the daemon starts clean.
+
+    Prefer os.close_range() (a single syscall) when the interpreter exposes it;
+    fall back to os.closerange() (C-level loop) otherwise. Note os.close_range
+    is only present when CPython's build-time configure detected the syscall, so
+    many interpreters take the fallback even on kernels that have close_range.
+    fds 0/1/2 are reopened to /dev/null by the caller, so they are deliberately
+    not closed here (leaving them closed lets a later open() reuse 0/1/2 and
+    silently wire a data file to something a later write treats as stderr)."""
+    limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    if limit == resource.RLIM_INFINITY:
+        limit = os.sysconf("SC_OPEN_MAX")
+    if hasattr(os, "close_range"):
+        os.close_range(3, limit - 1)      # inclusive upper bound
+    else:
+        os.closerange(3, limit)           # exclusive upper bound
+
+
 def daemon(prefs, dirname=None, syslog_fac=syslog.LOG_DAEMON):
     """Turn into daemon"""
 
@@ -437,11 +457,13 @@ def daemon(prefs, dirname=None, syslog_fac=syslog.LOG_DAEMON):
         pid_f.write(f'{os.getpid()}\n')
     atexit.register(remove_pidfile, pidfile)
 
-    for file_desc in range(0, os.sysconf("SC_OPEN_MAX")):
-        try:
-            os.close(file_desc)
-        except OSError:
-            pass
+    close_inherited_fds()
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    if devnull > 2:
+        os.close(devnull)
 
     syslog.openlog(PROGNAME, syslog.LOG_PID, syslog_fac)
 
