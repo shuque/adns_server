@@ -52,7 +52,7 @@ from sortedcontainers import SortedDict
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
-__version__ = '0.7.4'
+__version__ = '0.7.5'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'
@@ -132,7 +132,7 @@ class ServerContext:
     startup (the DNS-cookie secret and the socket dispatch table).
     """
     prefs: Preferences
-    zonedict: "ZoneDict"  # double quotes defers resolution of ZoneDict
+    zonedict: "ZoneDict"
     cookie_secret: Optional[bytes] = None  # Secret for DNS cookie generation
 
     # default_factory=dict gives each ServerContext its OWN empty dict. A bare
@@ -391,6 +391,14 @@ def get_pid_file(prefs):
     return f'/tmp/{PROGNAME}.pid'
 
 
+def remove_pidfile(pidfile):
+    """atexit cleanup: remove the pidfile, tolerating its absence."""
+    try:
+        os.remove(pidfile)
+    except OSError:
+        pass
+
+
 def daemon(prefs, dirname=None, syslog_fac=syslog.LOG_DAEMON):
     """Turn into daemon"""
 
@@ -425,7 +433,7 @@ def daemon(prefs, dirname=None, syslog_fac=syslog.LOG_DAEMON):
 
     with open(pidfile, 'w', encoding="utf-8") as pid_f:
         pid_f.write(f'{os.getpid()}\n')
-    atexit.register(lambda: os.remove(pidfile))
+    atexit.register(remove_pidfile, pidfile)
 
     for file_desc in range(0, os.sysconf("SC_OPEN_MAX")):
         try:
@@ -2047,12 +2055,19 @@ def run_event_loop(ctx):
 
         for file_desc in ready_r:
             sock, handler, is_tcp = dispatch[file_desc]
+            # daemon=True so a worker still running at shutdown (e.g. a TCP
+            # thread blocked in recv() on a client that hasn't finished its
+            # message) doesn't hold up interpreter exit. Non-daemon threads are
+            # joined by threading._shutdown() before the process exits, which
+            # otherwise makes SIGTERM hang until a second signal and prevents
+            # the atexit pidfile cleanup from ever running.
             if is_tcp:
                 conn, addr = sock.accept()
-                threading.Thread(target=handler,
-                                 args=(conn, addr, ctx)).start()
+                threading.Thread(target=handler, args=(conn, addr, ctx),
+                                 daemon=True).start()
             else:
-                threading.Thread(target=handler, args=(sock, ctx)).start()
+                threading.Thread(target=handler, args=(sock, ctx),
+                                 daemon=True).start()
 
 
 if __name__ == '__main__':
