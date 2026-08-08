@@ -65,6 +65,11 @@ class FakeTCPSocket:
         self.sent = bytearray()
         self.closed = False
 
+    def settimeout(self, _timeout):
+        # recv_socket() sets a per-recv timeout for the read deadline; the
+        # fake serves buffered data synchronously, so this is a no-op.
+        pass
+
     def recv(self, num_octets):
         chunk = bytes(self._recv_buf[:num_octets])
         del self._recv_buf[:num_octets]

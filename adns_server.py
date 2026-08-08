@@ -53,7 +53,7 @@ from sortedcontainers import SortedDict
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
-__version__ = '0.7.7'
+__version__ = '0.8.0'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'
@@ -73,6 +73,9 @@ COOKIE_RECALCULATE_TIME = 21600
 # Message size limits (octets)
 UDP_MAXSIZE_NOEDNS = 512              # RFC 1035 UDP payload limit without EDNS
 TCP_MAXSIZE = 65533                   # 65535 max DNS message - 2-octet TCP length prefix
+
+# Timeouts (seconds)
+TCP_TIMEOUT = 5                       # Deadline to read one TCP query (RFC 7766 §8)
 
 # QTYPE / Meta-TYPE range (RFC 6895 section 3.1): 128-255 are Q and Meta
 # types. 255 (ANY) is handled separately, so the meta-type test excludes it.
@@ -120,6 +123,7 @@ class Preferences:                            # pylint: disable=too-many-instanc
     pidfile: Optional[str] = None          # PID file
     edns_udp_max: int = 1432               # -e: Max EDNS UDP payload we send
     edns_udp_adv: int = 1232               # Max EDNS UDP payload we advertise
+    tcp_timeout: int = TCP_TIMEOUT         # Deadline to read one TCP query (secs)
     nsid: Optional[bytes] = None           # NSID option string
     minimal_any: bool = False              # Minimal ANY (RFC 8482)
     cache_stats: bool = False              # Print online sig cache statistics
@@ -210,6 +214,8 @@ def init_config(prefs, zonedict, only_zones=False):
                     prefs.pidfile = val
                 elif key == 'edns':
                     prefs.edns_udp_max = val
+                elif key == 'tcp_timeout':
+                    prefs.tcp_timeout = val
                 elif key == 'user':
                     prefs.username = val
                 elif key == 'group':
@@ -535,15 +541,26 @@ def send_socket(sock, message):
     return True
 
 
-def recv_socket(sock, num_octets):
+def recv_socket(sock, num_octets, deadline=None):
     """Read and return exactly num_octets of data from a connected socket.
 
     TCP is a byte stream, so a single recv() may return fewer octets than
     requested (and may split the 2-octet length prefix from the message
     body across segments). Loop until num_octets have been read. Returns
-    None if the peer closes the connection before that many octets arrive."""
+    None if the peer closes the connection before that many octets arrive.
+
+    If deadline (a time.monotonic() value) is given, the whole read must
+    complete by then: the socket timeout is reset before each recv() to the
+    remaining budget, so a slow client that dribbles data can't reset the
+    clock and hold the connection open indefinitely. socket.timeout is raised
+    (as OSError) once the deadline passes."""
     data = bytearray()
     while len(data) < num_octets:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise socket.timeout("read deadline exceeded")
+            sock.settimeout(remaining)
         chunk = sock.recv(num_octets - len(data))
         if not chunk:
             return None
@@ -1994,11 +2011,15 @@ def handle_connection_tcp(sock, addr, ctx):
     query = None
     try:  # pylint: disable=too-many-try-statements
         cliaddr, cliport = addr[0:2]
-        prefix = recv_socket(sock, 2)
+        # Whole-transaction deadline: reading the length prefix plus the message
+        # body must complete within tcp_timeout, so a stalled or dribbling
+        # client can't tie up this worker thread indefinitely (RFC 7766 §8).
+        deadline = time.monotonic() + ctx.prefs.tcp_timeout
+        prefix = recv_socket(sock, 2, deadline)
         if prefix is None:
             return
         msg_len, = struct.unpack('!H', prefix)
-        body = recv_socket(sock, msg_len)
+        body = recv_socket(sock, msg_len, deadline)
         if body is None:
             log_message(f"error: TCP from ({cliaddr}, {cliport}): connection "
                         f"closed mid-message (expected {msg_len} octets)")
@@ -2009,6 +2030,11 @@ def handle_connection_tcp(sock, addr, ctx):
         query = DNSquery(prefix + body, cliaddr=cliaddr, cliport=cliport,
                          tcp=True)
         handle_query(query, sock, ctx)
+    except socket.timeout:
+        # Slow/stuck client hit the read deadline. Just drop the connection;
+        # sending SERVFAIL to a peer that isn't reading is pointless.
+        log_message(f"error: TCP from ({cliaddr}, {cliport}): read timed out "
+                    f"after {ctx.prefs.tcp_timeout}s")
     except Exception as exc_info:      # pylint: disable=broad-exception-caught
         log_message(f"error: unhandled exception in TCP handler: "
                     f"{exc_info}\n{traceback.format_exc()}")
