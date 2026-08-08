@@ -52,7 +52,7 @@ from sortedcontainers import SortedDict
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
-__version__ = '0.7.5'
+__version__ = '0.7.6'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'
@@ -395,8 +395,10 @@ def remove_pidfile(pidfile):
     """atexit cleanup: remove the pidfile, tolerating its absence."""
     try:
         os.remove(pidfile)
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError as exc_info:
+        log_message(f"warning: could not remove pidfile {pidfile}: {exc_info}")
 
 
 def daemon(prefs, dirname=None, syslog_fac=syslog.LOG_DAEMON):
