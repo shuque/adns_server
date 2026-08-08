@@ -27,7 +27,7 @@ import enum
 import random
 import binascii
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 import yaml
 import siphash
@@ -52,7 +52,7 @@ from sortedcontainers import SortedDict
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
-__version__ = '0.7.3'
+__version__ = '0.7.4'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'
@@ -121,8 +121,25 @@ class Preferences:                            # pylint: disable=too-many-instanc
     edns_udp_adv: int = 1232               # Max EDNS UDP payload we advertise
     nsid: Optional[bytes] = None           # NSID option string
     minimal_any: bool = False              # Minimal ANY (RFC 8482)
-    cookie_secret: Optional[bytes] = None  # Secret for DNS cookie generation
     cache_stats: bool = False              # Print online sig cache statistics
+
+
+@dataclass
+class ServerContext:
+    """
+    Per-server runtime state, passed explicitly to the query path.
+    Bundles the configured preferences, the loaded zones, and state derived at
+    startup (the DNS-cookie secret and the socket dispatch table).
+    """
+    prefs: Preferences
+    zonedict: "ZoneDict"
+    cookie_secret: Optional[bytes] = None  # Secret for DNS cookie generation
+
+    # default_factory=dict gives each ServerContext its OWN empty dict. A bare
+    # "dispatch: dict = {}" would evaluate the {} once at class-definition time
+    # and share that single dict across every instance (the mutable-default
+    # trap); dataclasses forbid it. The factory is called per instance instead.
+    dispatch: dict = field(default_factory=dict)
 
 
 def make_arg_parser():
@@ -303,13 +320,32 @@ def process_args(prefs, zonedict, arguments):
         prefs.edns_udp_max = args.edns_udp_max
 
 
+# Logging is a process-wide singleton, intentionally NOT part of ServerContext:
+# it must work before any context exists (early startup, arg parsing) and is
+# global to the process regardless of how many zones/contexts are served.
+# _LOG_LOCK serializes concurrent foreground prints from worker threads. The
+# defaults (foreground, LOG_INFO) apply until init_logging() reads the prefs;
+# having them available at import time is what lets tests call log_message()
+# without any setup.
+_LOG_LOCK = threading.Lock()
+_LOG_DAEMON = False
+_LOG_PRI = syslog.LOG_INFO
+
+
+def init_logging(prefs):
+    """Configure the logging singleton from parsed preferences."""
+    global _LOG_DAEMON, _LOG_PRI    # pylint: disable=global-statement
+    _LOG_DAEMON = prefs.daemon
+    _LOG_PRI = prefs.syslog_pri
+
+
 def log_message(msg):
     """log informational message"""
 
-    if PREFS.daemon:
-        syslog.syslog(PREFS.syslog_pri, msg)
+    if _LOG_DAEMON:
+        syslog.syslog(_LOG_PRI, msg)
     else:
-        with tlock:
+        with _LOG_LOCK:
             print(msg)
 
 
@@ -319,14 +355,6 @@ def log_fatal(msg):
     sys.exit(1)
 
 
-def handle_sighup(signum, frame):
-    """handle SIGHUP - re-read configuration and zone files"""
-    _, _ = signum, frame
-    log_message('control: caught SIGHUP .. re-reading config and zones.')
-    sign_rrset.cache.clear()
-    init_config(PREFS, ZONEDICT)
-
-
 def handle_sigterm(signum, frame):
     """handle SIGTERM - exit program"""
     _, _ = signum, frame
@@ -334,26 +362,36 @@ def handle_sigterm(signum, frame):
     sys.exit(0)
 
 
-def install_signal_handlers():
-    """Install handlers for HUP and TERM signals"""
+def install_signal_handlers(ctx):
+    """Install handlers for HUP and TERM signals.
+
+    The HUP handler re-reads config/zones into the given context; it is bound
+    via a closure since signal handlers get a fixed (signum, frame) signature."""
+
+    def handle_sighup(signum, frame):
+        _, _ = signum, frame
+        log_message('control: caught SIGHUP .. re-reading config and zones.')
+        sign_rrset.cache.clear()
+        init_config(ctx.prefs, ctx.zonedict)
+
     signal.signal(signal.SIGTERM, handle_sigterm)
     signal.signal(signal.SIGHUP, handle_sighup)
 
 
-def get_pid_file():
+def get_pid_file(prefs):
     """Get name of PID file to create"""
 
-    if PREFS.pidfile:
-        return PREFS.pidfile
-    if PREFS.workdir:
-        return os.path.join(PREFS.workdir, 'daemon.pid')
+    if prefs.pidfile:
+        return prefs.pidfile
+    if prefs.workdir:
+        return os.path.join(prefs.workdir, 'daemon.pid')
     return f'/tmp/{PROGNAME}.pid'
 
 
-def daemon(dirname=None, syslog_fac=syslog.LOG_DAEMON):
+def daemon(prefs, dirname=None, syslog_fac=syslog.LOG_DAEMON):
     """Turn into daemon"""
 
-    pidfile = get_pid_file()
+    pidfile = get_pid_file(prefs)
     if os.path.exists(pidfile):
         print(f"File {pidfile} already exists.")
         sys.exit(1)
@@ -939,11 +977,12 @@ class DNSquery:
 class DNSresponse:
     """DNS response object"""
 
-    def __init__(self, query):
+    def __init__(self, query, ctx):
 
         self.query = query
-        self.response = dns.message.make_response(query.message,
-                                                  our_payload=PREFS.edns_udp_adv)
+        self.ctx = ctx
+        self.response = dns.message.make_response(
+            query.message, our_payload=ctx.prefs.edns_udp_adv)
 
         if not self.query.headeronly:
             # Canonicalize (downcase) the query name for all internal
@@ -993,9 +1032,10 @@ class DNSresponse:
 
         if self.query.tcp:
             return TCP_MAXSIZE
-        if (PREFS.edns_udp_max == 0) or (self.query.message.edns == -1):
+        if (self.ctx.prefs.edns_udp_max == 0) or \
+                (self.query.message.edns == -1):
             return UDP_MAXSIZE_NOEDNS
-        return min(self.query.message.payload, PREFS.edns_udp_max)
+        return min(self.query.message.payload, self.ctx.prefs.edns_udp_max)
 
     def truncate(self):
         """Truncate response message"""
@@ -1030,7 +1070,7 @@ class DNSresponse:
             rrsig = None
             if zobj.online_signing():
                 rrsig = sign_rrset(zobj, HashableRRset(rrset))
-                if PREFS.cache_stats:
+                if self.ctx.prefs.cache_stats:
                     log_message(f"sigcache: {sign_rrset.cache_info()}")
             elif zobj.dnssec:
                 rrname = wildcard if wildcard else rrset.name
@@ -1297,7 +1337,7 @@ class DNSresponse:
             self.nodata(zobj, sname, wildcard)
             return
 
-        if PREFS.minimal_any:
+        if self.ctx.prefs.minimal_any:
             for rdataset in rdatasets:
                 if rdataset.rdtype == dns.rdatatype.RRSIG:
                     continue
@@ -1656,7 +1696,7 @@ class DNSresponse:
     def find_answer(self, qname, qtype):
         """Find answer for name and type"""
 
-        zobj = ZONEDICT.find(qname)
+        zobj = self.ctx.zonedict.find(qname)
         if zobj is None:
             if not self.response.answer:
                 self.response.set_rcode(dns.rcode.REFUSED)
@@ -1681,7 +1721,8 @@ class DNSresponse:
     def need_edns(self):
         """Do we need to add EDNS Opt RR?"""
 
-        return (PREFS.edns_udp_max != 0) and (self.query.message.edns != -1)
+        return (self.ctx.prefs.edns_udp_max != 0) and \
+            (self.query.message.edns != -1)
 
     def add_cookie_option(self, data):
         """Add EDNS Cookie option with given cookie data"""
@@ -1724,7 +1765,7 @@ class DNSresponse:
 
         clientip = self.query.cliaddr
         version = b'\x01'
-        sip = siphash.SipHash_2_4(PREFS.cookie_secret)
+        sip = siphash.SipHash_2_4(self.ctx.cookie_secret)
         sip.update(clientcookie + version + reserved + timestamp + bytes(clientip, 'ascii'))
         return version + reserved + timestamp + sip.digest()
 
@@ -1771,9 +1812,9 @@ class DNSresponse:
             self.edns_flags |= EdnsFlag.DELEG_EXT_OK
 
         for option in self.query.message.options:
-            if PREFS.nsid and (option.otype == dns.edns.NSID):
-                self.edns_options.append(dns.edns.GenericOption(dns.edns.NSID,
-                                                      PREFS.nsid))
+            if self.ctx.prefs.nsid and (option.otype == dns.edns.NSID):
+                self.edns_options.append(dns.edns.GenericOption(
+                    dns.edns.NSID, self.ctx.prefs.nsid))
             elif option.otype == dns.edns.COOKIE:
                 if hasattr(option, 'data'):
                     self.process_cookie(option.data)
@@ -1785,8 +1826,8 @@ class DNSresponse:
 
         self.response.use_edns(edns=0,
                                ednsflags=self.edns_flags,
-                               payload=PREFS.edns_udp_adv,
-                               request_payload=PREFS.edns_udp_max,
+                               payload=self.ctx.prefs.edns_udp_adv,
+                               request_payload=self.ctx.prefs.edns_udp_max,
                                options=self.edns_options)
 
     def prepare_response(self):
@@ -1852,13 +1893,13 @@ class DNSresponse:
                 self.response.flags |= dns.flags.AA
 
 
-def handle_query(query, sock):
+def handle_query(query, sock, ctx):
     """Handle incoming query"""
 
     if not query.message:
         return
 
-    response = DNSresponse(query)
+    response = DNSresponse(query, ctx)
     if not response.response:
         return
 
@@ -1889,25 +1930,25 @@ def send_servfail(query, sock):
         log_message(f"error: failed to send SERVFAIL: {exc_info}")
 
 
-def handle_connection_udp(sock, rbufsize=2048):
+def handle_connection_udp(sock, ctx, rbufsize=2048):
     """Handle UDP connection"""
 
     query = None
     try:
         data, addrport = sock.recvfrom(rbufsize)
         cliaddr, cliport = addrport[0:2]
-        if PREFS.debug:
+        if ctx.prefs.debug:
             log_message(f"connect: UDP from ({cliaddr}, {cliport}) "
                         f"msgsize={len(data)}")
         query = DNSquery(data, cliaddr=cliaddr, cliport=cliport)
-        handle_query(query, sock)
+        handle_query(query, sock, ctx)
     except Exception as exc_info:      # pylint: disable=broad-exception-caught
         log_message(f"error: unhandled exception in UDP handler: "
                     f"{exc_info}\n{traceback.format_exc()}")
         send_servfail(query, sock)
 
 
-def handle_connection_tcp(sock, addr):
+def handle_connection_tcp(sock, addr, ctx):
     """Handle TCP connection
 
     Read one length-prefixed DNS message (RFC 1035 4.2.2): a 2-octet length
@@ -1927,12 +1968,12 @@ def handle_connection_tcp(sock, addr):
             log_message(f"error: TCP from ({cliaddr}, {cliport}): connection "
                         f"closed mid-message (expected {msg_len} octets)")
             return
-        if PREFS.debug:
+        if ctx.prefs.debug:
             log_message(f"connect: TCP from ({cliaddr}, {cliport}) "
                         f"msgsize={msg_len}")
         query = DNSquery(prefix + body, cliaddr=cliaddr, cliport=cliport,
                          tcp=True)
-        handle_query(query, sock)
+        handle_query(query, sock, ctx)
     except Exception as exc_info:      # pylint: disable=broad-exception-caught
         log_message(f"error: unhandled exception in TCP handler: "
                     f"{exc_info}\n{traceback.format_exc()}")
@@ -1965,32 +2006,34 @@ def setup_sockets(family, server, port):
     return dispatch
 
 
-def setup_server():
-    """Setup server ..."""
+def setup_server(ctx):
+    """Setup server: derive runtime state and open listening sockets.
 
-    PREFS.cookie_secret = binascii.hexlify(random.randbytes(8))
+    Populates ctx.cookie_secret and ctx.dispatch (the fileno -> handler map)."""
 
-    if PREFS.daemon:
-        daemon(dirname=PREFS.workdir, syslog_fac=PREFS.syslog_fac)
-    install_signal_handlers()
+    prefs = ctx.prefs
+    ctx.cookie_secret = binascii.hexlify(random.randbytes(8))
+
+    if prefs.daemon:
+        daemon(prefs, dirname=prefs.workdir, syslog_fac=prefs.syslog_fac)
+    install_signal_handlers(ctx)
     log_message(f"info: {PROGNAME} version {__version__}: running")
 
     try:
-        dispatch = setup_sockets(PREFS.server_af,
-                                 PREFS.server, PREFS.port)
+        ctx.dispatch = setup_sockets(prefs.server_af, prefs.server, prefs.port)
     except PermissionError as exc_info:
         log_fatal(f"Error setting up sockets: {exc_info}")
 
-    if PREFS.username or PREFS.groupname:
-        drop_privs(PREFS.username, PREFS.groupname)
+    if prefs.username or prefs.groupname:
+        drop_privs(prefs.username, prefs.groupname)
 
-    log_message(f"info: Listening on UDP and TCP port {PREFS.port}")
-    return dispatch
+    log_message(f"info: Listening on UDP and TCP port {prefs.port}")
 
 
-def run_event_loop(dispatch):
+def run_event_loop(ctx):
     """Run main event loop ..."""
 
+    dispatch = ctx.dispatch
     while True:
         try:
             (ready_r, _, _) = select.select(dispatch, [], [], 5)
@@ -2003,16 +2046,16 @@ def run_event_loop(dispatch):
             sock, handler, is_tcp = dispatch[file_desc]
             if is_tcp:
                 conn, addr = sock.accept()
-                threading.Thread(target=handler, args=(conn, addr)).start()
+                threading.Thread(target=handler,
+                                 args=(conn, addr, ctx)).start()
             else:
-                threading.Thread(target=handler, args=(sock,)).start()
+                threading.Thread(target=handler, args=(sock, ctx)).start()
 
 
 if __name__ == '__main__':
 
-    tlock = threading.Lock()
-    PREFS = Preferences()
-    ZONEDICT = ZoneDict()
-    process_args(PREFS, ZONEDICT, sys.argv[1:])
-    DISPATCH = setup_server()
-    run_event_loop(DISPATCH)
+    CTX = ServerContext(prefs=Preferences(), zonedict=ZoneDict())
+    process_args(CTX.prefs, CTX.zonedict, sys.argv[1:])
+    init_logging(CTX.prefs)
+    setup_server(CTX)
+    run_event_loop(CTX)

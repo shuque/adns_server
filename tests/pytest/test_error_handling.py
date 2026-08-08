@@ -9,10 +9,13 @@ sockets and monkeypatching -- the response path has to be made to raise, which
 can't be provoked from a normal client query.
 """
 
+# The ctx fixture is defined and consumed in this module; a test taking it as
+# an argument necessarily shadows the fixture name (standard pytest pattern).
+# pylint: disable=redefined-outer-name
+
 import os
 import struct
 import sys
-import threading
 
 import pytest
 
@@ -26,15 +29,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__),
 import adns_server as adns   # noqa: E402
 
 
-@pytest.fixture(autouse=True)
-def _server_globals():
-    """adns_server references PREFS/tlock as module globals (normally created
-    in __main__). Provide them for direct-import tests, foreground so
-    log_message() prints (capturable) instead of going to syslog."""
-    adns.PREFS = adns.Preferences()
-    adns.PREFS.daemon = False
-    adns.tlock = threading.Lock()
-    yield
+@pytest.fixture
+def ctx():
+    """A minimal ServerContext for the handlers under test (no zones needed;
+    these tests fault the response path before zone lookup)."""
+    return adns.ServerContext(prefs=adns.Preferences(),
+                              zonedict=adns.ZoneDict())
 
 
 # --------------------------------------------------------------------------
@@ -141,11 +141,11 @@ def test_send_servfail_noop_when_unparsed():
 # handle_connection_udp / _tcp exception paths
 # --------------------------------------------------------------------------
 
-def test_udp_handler_exception_sends_servfail(monkeypatch, capsys):
+def test_udp_handler_exception_sends_servfail(monkeypatch, capsys, ctx):
     monkeypatch.setattr(adns, "handle_query", _boom)
     sock = FakeUDPSocket(recv_data=_query_wire())
     # Must not raise out of the thread body.
-    adns.handle_connection_udp(sock)
+    adns.handle_connection_udp(sock, ctx)
     assert len(sock.sent) == 1
     resp = dns.message.from_wire(sock.sent[0][0])
     assert resp.rcode() == dns.rcode.SERVFAIL
@@ -155,10 +155,11 @@ def test_udp_handler_exception_sends_servfail(monkeypatch, capsys):
     assert "Traceback" in err
 
 
-def test_tcp_handler_exception_sends_servfail_and_closes(monkeypatch, capsys):
+def test_tcp_handler_exception_sends_servfail_and_closes(monkeypatch, capsys,
+                                                         ctx):
     monkeypatch.setattr(adns, "handle_query", _boom)
     sock = FakeTCPSocket(recv_data=_tcp_frame(_query_wire()))
-    adns.handle_connection_tcp(sock, ("192.0.2.1", 12345))
+    adns.handle_connection_tcp(sock, ("192.0.2.1", 12345), ctx)
     # SERVFAIL sent.
     msg_len, = struct.unpack("!H", bytes(sock.sent[:2]))
     resp = dns.message.from_wire(bytes(sock.sent[2:2 + msg_len]))
@@ -170,17 +171,17 @@ def test_tcp_handler_exception_sends_servfail_and_closes(monkeypatch, capsys):
     assert "Traceback" in err
 
 
-def test_tcp_socket_closed_on_normal_path(monkeypatch):
+def test_tcp_socket_closed_on_normal_path(monkeypatch, ctx):
     """The finally clause closes the socket on the success path too."""
     monkeypatch.setattr(adns, "handle_query", lambda *a, **k: None)
     sock = FakeTCPSocket(recv_data=_tcp_frame(_query_wire()))
-    adns.handle_connection_tcp(sock, ("192.0.2.1", 12345))
+    adns.handle_connection_tcp(sock, ("192.0.2.1", 12345), ctx)
     assert sock.closed
 
 
-def test_tcp_socket_closed_on_empty_read():
+def test_tcp_socket_closed_on_empty_read(ctx):
     """A peer that closes before sending is handled and the fd is released."""
     sock = FakeTCPSocket(recv_data=b"")   # recv() returns b'' immediately
-    adns.handle_connection_tcp(sock, ("192.0.2.1", 12345))
+    adns.handle_connection_tcp(sock, ("192.0.2.1", 12345), ctx)
     assert sock.closed
     assert not sock.sent
