@@ -132,7 +132,7 @@ class ServerContext:
     startup (the DNS-cookie secret and the socket dispatch table).
     """
     prefs: Preferences
-    zonedict: "ZoneDict"
+    zonedict: "ZoneDict"  # double quotes defers resolution of ZoneDict
     cookie_secret: Optional[bytes] = None  # Secret for DNS cookie generation
 
     # default_factory=dict gives each ServerContext its OWN empty dict. A bare
