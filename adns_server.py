@@ -365,8 +365,11 @@ def handle_sigterm(signum, frame):
 def install_signal_handlers(ctx):
     """Install handlers for HUP and TERM signals.
 
-    The HUP handler re-reads config/zones into the given context; it is bound
-    via a closure since signal handlers get a fixed (signum, frame) signature."""
+    signal.signal() invokes handlers with a fixed (signum, frame) signature, so
+    there is no parameter slot to pass ctx in. handle_sighup therefore closes
+    over ctx from this enclosing scope to reach ctx.prefs/ctx.zonedict for the
+    config/zone re-read. SIGTERM needs no such state, so it stays a plain
+    module-level function."""
 
     def handle_sighup(signum, frame):
         _, _ = signum, frame
