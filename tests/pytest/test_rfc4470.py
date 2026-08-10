@@ -68,15 +68,41 @@ def test_nxdomain_wildcard_nsec(query, dnskey):
 
 def test_nxdomain_deep_name_covered(query, dnskey):
     """
-    A qname several labels below the closest encloser is still covered: the
-    predecessor is taken of the next-closer name and the successor of the full
-    qname, so the interval spans the whole qname.
+    A qname several labels below the closest encloser is still covered, and --
+    critically -- the covering NSEC is built from the next-closer name (sname),
+    so its owner and next both stay same-parent siblings of sname. A strict
+    validator therefore derives the closest encloser as the apex (sname.parent),
+    not some deeper name. Guards the multi-label-gap variant of the
+    Google/unbound "Missing NSEC record" SERVFAIL.
     """
-    r = query("a.b.c.whitelies.test", "A", do=True)
+    qname = dns.name.from_text("a.b.c.whitelies.test.")
+    r = query(qname, "A", do=True)
     assert du.rcode(r) == "NXDOMAIN"
     nsecs = _nsecs(r.authority)
-    assert any(du.nsec_covers(n, "a.b.c.whitelies.test") for n in nsecs)
+    covering = [n for n in nsecs if du.nsec_covers(n, qname)]
+    assert covering
+    for n in covering:
+        # Neither endpoint may drag extra shared labels into the closest
+        # encloser: the qname must not be a suffix of the next name, and the
+        # deepest name shared with owner/next must be the true CE (apex here).
+        assert not qname.is_subdomain(n[0].next)
+        for endpoint in (n.name, n[0].next):
+            shared = _longest_common_suffix(qname, endpoint)
+            assert shared == dns.name.from_text("whitelies.test.")
+    # The wildcard proof is *.whitelies.test, matching that derived CE.
+    assert any(du.nsec_covers(w, "*.whitelies.test") for w in nsecs)
     du.validate_all(r, dnskey(ZONE), ZONE)
+
+
+def _longest_common_suffix(a, b):
+    """Deepest name (counting from the root) that a and b share."""
+    n = 0
+    for la, lb in zip(reversed(a.labels), reversed(b.labels)):
+        if la == lb:
+            n += 1
+        else:
+            break
+    return dns.name.Name(a.labels[len(a.labels) - n:])
 
 
 def test_nxdomain_is_not_compact_black_lie(query):
@@ -100,6 +126,29 @@ def test_nxdomain_covering_nsec_owner_below_qname(query):
     assert covering
     for n in covering:
         assert n.name < qname < n[0].next
+
+
+def test_nxdomain_next_preserves_closest_encloser(query, dnskey):
+    """
+    Regression for the Google/unbound SERVFAIL ("Missing NSEC record"): the
+    covering NSEC's `next` name must not make the qname a proper suffix of it,
+    or a strict validator derives the closest encloser as the qname itself and
+    then looks for a wildcard NSEC at *.<qname> (which we do not send). The
+    same-parent (appended-octet) successor keeps the closest encloser correct.
+    """
+    qname = dns.name.from_text("nxd123.walt-style.whitelies.test.")
+    r = query(qname, "A", do=True)
+    assert du.rcode(r) == "NXDOMAIN"
+    covering = [n for n in _nsecs(r.authority) if du.nsec_covers(n, qname)]
+    assert covering
+    for n in covering:
+        # qname must NOT be a subdomain (suffix) of the next name.
+        assert not qname.is_subdomain(n[0].next)
+        # The wildcard proof we send is *.<closest-encloser> = *.whitelies.test,
+        # so a strict validator must derive that same closest encloser.
+        assert any(du.nsec_covers(w, "*.whitelies.test")
+                   for w in _nsecs(r.authority))
+    du.validate_all(r, dnskey(ZONE), ZONE)
 
 
 # --------------------------------------------------------------------------
@@ -200,9 +249,37 @@ def test_predecessor_name_drops_empty_label():
 
 
 def test_successor_name():
-    """Successor prepends an empty (0x00) leftmost label."""
+    """
+    Successor appends a 0x00 octet to the leftmost label (a same-parent
+    sibling), NOT a prepended 0x00 label -- so the name does not become a
+    proper suffix of its successor and closest-encloser derivation is unharmed.
+    """
     assert adns.successor_name(_n("foo.whitelies.test.")) == \
-        dns.name.Name((b"\x00", b"foo", b"whitelies", b"test", b""))
+        dns.name.Name((b"foo\x00", b"whitelies", b"test", b""))
+
+
+def test_successor_name_preserves_closest_encloser():
+    """
+    Regression (Google/unbound SERVFAIL "Missing NSEC record"): the qname must
+    NOT be a proper suffix of its successor, or a strict validator derives the
+    closest encloser as the qname itself and demands the wrong wildcard NSEC.
+    The successor must share the qname's label count and parent.
+    """
+    qname = _n("nxd123.walt.huque.com.")
+    successor = adns.successor_name(qname)
+    assert len(successor.labels) == len(qname.labels)
+    assert successor.parent() == qname.parent()
+    assert not qname.is_subdomain(successor)   # qname is not a suffix of succ
+    assert qname < successor
+
+
+def test_successor_name_long_label_fallback():
+    """A 63-octet leftmost label has no room to append; fall back to prepend."""
+    long_label = b"a" * adns.MAX_LABEL_OCTETS
+    name = dns.name.Name((long_label, b"walt", b"huque", b"com", b""))
+    successor = adns.successor_name(name)
+    assert successor == dns.name.Name((b"\x00",) + name.labels)
+    assert name < successor
 
 
 def test_covering_predecessor_no_collision():
@@ -231,7 +308,7 @@ def test_covering_predecessor_snaps_on_collision():
     qname = _n("fop.whitelies.test.")
     floor = _n("foo\\127.whitelies.test.")
     pred = zone.covering_predecessor(qname)
-    assert pred == adns.successor_name(floor)        # \000.foo\127
+    assert pred == adns.successor_name(floor)        # foo\127\000
     # The snapped predecessor sits strictly between the real floor and qname,
     # so it neither hits nor spans the real name.
     assert floor < pred < qname
@@ -246,7 +323,8 @@ def test_covering_predecessor_nothing_below():
 
 
 def test_covering_successor_normal():
-    """Absent a literal \\000-prefixed owner, the successor is \\000.name."""
+    """Absent a literal same-parent 0x00 successor, it is name with \\000
+    appended to the leftmost label."""
     zone = _zone(["foo IN A 192.0.2.1"])
     name = _n("foo.whitelies.test.")
     assert zone.covering_successor(name) == adns.successor_name(name)
@@ -254,11 +332,11 @@ def test_covering_successor_normal():
 
 def test_covering_successor_collision_guard():
     """
-    Pathological guard: if the literal successor \\000.name already exists, fall
-    back to a name derived from the next real owner above it, still > name.
+    Pathological guard: if the literal successor (name\\000) already exists,
+    fall back to a name derived from the next real owner above it, still > name.
     """
     zone = _zone(["x IN A 192.0.2.1",
-                  "\\000.x IN A 192.0.2.2",
+                  "x\\000 IN A 192.0.2.2",
                   "z IN A 192.0.2.3"])
     name = _n("x.whitelies.test.")
     successor = zone.covering_successor(name)

@@ -1097,9 +1097,27 @@ def predecessor_name(name, ideal=False):
 
 def successor_name(name):
     """
-    Return the successor of a domain name: the smallest name strictly greater
-    than it, formed by prepending an empty (0x00) leftmost label.
+    Return the immediate successor of a domain name: the smallest name strictly
+    greater than it that shares the same parent, formed by appending a 0x00
+    octet to the leftmost label (RFC 4470/4471 "successor").
+
+    We must NOT prepend a 0x00 *label* (\\000.name) here: that makes `name` a
+    proper suffix of the successor, so a strict validator computing the closest
+    encloser from the covering NSEC's next field (RFC 4035 5.4, RFC 7129) would
+    conclude the closest encloser is `name` itself (as if it were an empty
+    non-terminal) and then demand a wildcard NSEC at *.name rather than
+    *.<real-closest-encloser> -- yielding SERVFAIL / "Missing NSEC record".
+    Appending an octet keeps the label count identical, so the successor stays
+    a sibling and the closest-encloser derivation is unaffected.
+
+    In the (pathological) case of a 63-octet leftmost label there is no room to
+    append; fall back to prepending a 0x00 label, which is still a valid strict
+    successor (only the closest-encloser subtlety above is at stake, and a
+    63-octet synthetic label cannot occur from predecessor/wildcard synthesis).
     """
+    first = name.labels[0]
+    if len(first) < MAX_LABEL_OCTETS:
+        return dns.name.Name((first + b'\x00',) + name.labels[1:])
     return dns.name.Name((b'\x00',) + name.labels)
 
 
@@ -1343,10 +1361,22 @@ class DNSresponse:
         and one covering the relevant wildcard (*.<closest-encloser>) to prove
         no wildcard would have matched. Both owner names are collision-checked
         against the real zone (Zone.covering_predecessor / covering_successor)
-        so a synthetic name never spans or denies an existing name. The
-        predecessor of sname (the next-closer name) paired with the successor
-        of the qname yields an interval covering the whole qname even when the
-        qname is several labels below the closest encloser.
+        so a synthetic name never spans or denies an existing name.
+
+        The covering interval for the qname is built around the next-closer
+        name (sname = closest-encloser plus one label toward the qname), NOT the
+        full qname: (predecessor(sname), successor(sname)). A strict validator
+        reconstructs the closest encloser as the longest suffix the queried name
+        shares with the NSEC's owner OR next name (RFC 4035 5.4, RFC 7129);
+        both endpoints here are same-parent siblings of sname, so that longest
+        shared suffix is exactly sname.parent() == the closest encloser. Using
+        the full qname (which is a subdomain of sname when the qname is several
+        labels below the closest encloser) would leak extra shared labels into
+        the next name and make the validator derive too deep a closest encloser,
+        then demand a wildcard NSEC we never send -> SERVFAIL. The interval
+        (predecessor(sname), successor(sname)) still covers the whole qname,
+        since every subdomain of sname sorts between sname's predecessor and
+        successor.
         """
         self.response.set_rcode(dns.rcode.NXDOMAIN)
         ideal = self.ctx.prefs.nsec_ideal_predecessor
@@ -1354,7 +1384,7 @@ class DNSresponse:
 
         nsec_qname = make_nsec_rrset(
             zobj.covering_predecessor(sname, ideal=ideal),
-            zobj.covering_successor(self.qname),
+            zobj.covering_successor(sname),
             rrtypes, zobj.soa_min_ttl)
         self.add_rrset(zobj, self.response.authority, nsec_qname)
 
