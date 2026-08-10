@@ -10,9 +10,21 @@ production use or high performance applications.
 The server implements the DNSSEC protocol extensions. It can serve
 pre-signed master file format zones, both NSEC and NSEC3 (e.g. zones
 generated with an offline signer like BIND's dnssec-signzone). It can
-also perform online signing with a combined signing key, using the
-[Compact Denial of Existence](https://datatracker.ietf.org/doc/draft-ietf-dnsop-compact-denial-of-existence/) method, using either NSEC or NSEC3, and can also do traditional NSEC3
-White Lies.
+also perform online signing with a combined signing key. For online
+signing it supports several methods of denial of existence:
+
+* [Compact Denial of Existence](https://datatracker.ietf.org/doc/rfc9824/)
+  (RFC 9824), using either NSEC or NSEC3. This is enabled per zone with
+  'compact_denial: true'.
+* [Minimally Covering NSEC records](https://datatracker.ietf.org/doc/rfc4470/)
+  (RFC 4470), sometimes called NSEC "white lies": per-query synthesized NSEC
+  records covering the smallest interval that proves nonexistence, so no real
+  zone contents are exposed and the zone cannot be walked. This is the default
+  for an online-signed NSEC zone (i.e. Compact Denial not enabled, and no
+  NSEC3PARAM record in the zone). An 'nsec_ideal_predecessor' preference selects
+  the ideal (63-octet) predecessor form; the default is a shorter,
+  human-readable sentinel form.
+* Traditional NSEC3 White Lies.
 
 The 'dnssec: true' parameter must be specified in the configuration file
 for signed zones. The 'dynamic_signing: true' and 'private_key: /path/to/privatekey.pem'
@@ -81,28 +93,28 @@ To install a specific released version, append the tag, e.g.
 
 ```
 $ adns_server.py -h
-Reading config from: adnsconfig.yaml
-adns_server.py version X.Y.Z
-Usage: adns_server.py [<Options>]
+usage: adns_server.py [-h] [--version] [-c FILE] [-w DIR] [-d] [-p N]
+                      [-s ADDR] [-u USER] [-g GROUP] [-4 | -6] [-f] [-e N]
 
-Options:
-       -h:        Print usage string
-       -c file:   Configuration file (default 'adnsconfig.yaml')
-       -d:        Turn on debugging
-       -p N:      Listen on port N (default 53)
-       -s A:      Bind to server address A (default wildcard address)
-       -u uname:  Drop privileges to UID of specified username
-                  (if server started running as root)
-       -g group:  Drop provileges to GID of specified groupname
-                  (if server started running as root)
-       -4:        Use IPv4 only
-       -6:        Use IPv6 only
-       -f:        Remain attached to foreground (default don't)
-       -e N:      Max EDNS bufsize in octets for responses we send out.
-                  (-e 0 will disable EDNS support)
+adns_server.py version X.Y.Z - An authoritative DNS server
 
-Note: a configuration file that minimally specifies the zones to load
-must be present.
+options:
+  -h, --help  show this help message and exit
+  --version   show program's version number and exit
+  -c FILE     Configuration file (default: adnsconfig.yaml)
+  -w DIR      Working directory (overrides config workdir)
+  -d          Turn on debugging
+  -p N        Listen on port N (default: 53)
+  -s ADDR     Bind to server address (default: wildcard)
+  -u USER     Drop privileges to UID of specified user (if started as root)
+  -g GROUP    Drop privileges to GID of specified group (if started as root)
+  -4          Use IPv4 only
+  -6          Use IPv6 only
+  -f          Remain attached to foreground
+  -e N        Max EDNS bufsize in octets for responses we send out (-e 0
+              disables EDNS support)
+
+Note: a configuration file that minimally specifies the zones to load must be present.
 ```
 
 ### Configuration file
