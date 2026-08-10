@@ -783,12 +783,14 @@ class Zone(dns.zone.Zone):
     def covering_successor(self, name):
         """
         Return the successor of `name` for RFC 4470 covering NSECs, guarding
-        the (pathological) case where the literal successor \000.name already
-        exists in the zone. Real \000-prefixed owners are effectively
-        nonexistent, so this is a cheap existence check with a defensive
-        fallback rather than an iterative search: if \000.name exists, fall
-        back to the predecessor of the next real name above it, which still
-        sits strictly above `name`.
+        the (pathological) case where the literal successor already exists in
+        the zone. The literal successor is whatever successor_name() computes --
+        normally `name` with a 0x00 octet appended to its leftmost label
+        (name\\000), a same-parent sibling. Such synthetic owners are
+        effectively nonexistent in real zones, so this is a cheap existence
+        check with a defensive fallback rather than an iterative search: if the
+        literal successor already exists, fall back to the predecessor of the
+        next real name above it, which still sits strictly above `name`.
         """
         successor = successor_name(name)
         if self.nodes.get(successor) is None:
@@ -1102,13 +1104,21 @@ def successor_name(name):
     octet to the leftmost label (RFC 4470/4471 "successor").
 
     We must NOT prepend a 0x00 *label* (\\000.name) here: that makes `name` a
-    proper suffix of the successor, so a strict validator computing the closest
-    encloser from the covering NSEC's next field (RFC 4035 5.4, RFC 7129) would
-    conclude the closest encloser is `name` itself (as if it were an empty
-    non-terminal) and then demand a wildcard NSEC at *.name rather than
-    *.<real-closest-encloser> -- yielding SERVFAIL / "Missing NSEC record".
-    Appending an octet keeps the label count identical, so the successor stays
-    a sibling and the closest-encloser derivation is unaffected.
+    proper suffix of the successor. Since the covering NSEC's next name is
+    proven to exist, so is its ancestor `name` -- so the NSEC inadvertently
+    proves `name` exists (as an empty non-terminal) even as it denies it. A
+    strict validator reconstructing the closest encloser from the NSEC then
+    concludes the closest encloser is `name` itself and demands a wildcard NSEC
+    at *.name rather than *.<real-closest-encloser> -- yielding SERVFAIL /
+    "Missing NSEC record". (Closest encloser is defined in RFC 4592 3.3.1; for
+    plain NSEC there is no explicit derivation algorithm in the specs, so the
+    behavior is that of deployed validators -- confirmed in unbound's
+    val_nsec.c, whose nsec_closest_encloser() takes the longest common suffix
+    of the qname with the NSEC owner and next names, so a next name of which the
+    qname is a suffix yields closest-encloser = qname. See RFC 7129 for a
+    tutorial treatment.) Appending an octet keeps the label count identical, so
+    the successor stays a sibling and the closest-encloser derivation is
+    unaffected.
 
     In the (pathological) case of a 63-octet leftmost label there is no room to
     append; fall back to prepending a 0x00 label, which is still a valid strict
