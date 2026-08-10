@@ -1,0 +1,36 @@
+$TTL 86400
+$ORIGIN whitelies.test.
+@		IN	SOA	ns.whitelies.test. hostmaster.whitelies.test. (
+				1          ; Serial
+				43200      ; Refresh
+				3600       ; Retry
+				3628800    ; Expire
+				3600 )     ; Minimum
+		IN	NS	ns.whitelies.test.
+$INCLUDE whitelies.test/dnskey.txt
+;;
+;; Online-signed NSEC zone WITHOUT an NSEC3PARAM record (so NSEC), and
+;; WITHOUT compact_denial (so RFC 4470 minimally-covering NSEC white lies).
+;;
+;; Apex nameserver and a few ordinary names for positive / negative tests.
+;;
+ns		IN	A	192.0.2.1
+www		IN	A	192.0.2.10
+www		IN	AAAA	2001:db8::10
+;;
+;; A cluster of adjacent names used to probe covering-NSEC spans. A query for
+;; the nonexistent "fop" has good-predecessor "foo~", which must not span the
+;; real "foo"; a query for "fon" has good-predecessor "fom~", etc.
+;;
+foo		IN	A	192.0.2.11
+;;
+;; Wildcard, and an explicit name parallel to it, to test wildcard-nonexistence
+;; NSEC generation on NXDOMAIN below the wildcard's parent.
+;;
+*.wild		IN	A	192.0.2.20
+exact.wild	IN	A	192.0.2.21
+;;
+;; host.deep.ent is below an empty non-terminal (ent and deep.ent have no
+;; records of their own) -- exercises ENT NODATA (matching NSEC, NSEC+RRSIG).
+;;
+host.deep.ent	IN	A	192.0.2.30

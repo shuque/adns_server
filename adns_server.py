@@ -53,7 +53,7 @@ from sortedcontainers import SortedDict
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 
-__version__ = '0.9.0'
+__version__ = '0.10.0'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'
@@ -130,6 +130,7 @@ class Preferences:                            # pylint: disable=too-many-instanc
     max_workers: int = MAX_WORKERS         # Cap on concurrent worker threads
     nsid: Optional[bytes] = None           # NSID option string
     minimal_any: bool = False              # Minimal ANY (RFC 8482)
+    nsec_ideal_predecessor: bool = False   # RFC 4470 ideal (63-octet) predecessor
     cache_stats: bool = False              # Print online sig cache statistics
 
 
@@ -230,6 +231,8 @@ def init_config(prefs, zonedict, only_zones=False):
                     prefs.nsid = val.encode()
                 elif key == 'minimal_any':
                     prefs.minimal_any = val
+                elif key == 'nsec_ideal_predecessor':
+                    prefs.nsec_ideal_predecessor = val
                 elif key == "cache_stats":
                     prefs.cache_stats = val
                 else:
@@ -751,6 +754,51 @@ class Zone(dns.zone.Zone):
                 return nsec_rrset
             position -= 1
 
+    def covering_predecessor(self, name, ideal=False):
+        """
+        Return an RFC 4470 minimally-covering predecessor of `name` that is
+        guaranteed not to collide with, or span across, any existing name in
+        the zone. The result P satisfies floor < P < name, where floor is the
+        greatest existing owner name strictly less than `name`.
+
+        The syntactic predecessor (predecessor_name) is used when it sorts
+        above the real floor; otherwise it would span or land on a real name,
+        so we snap to successor_name(floor) -- the smallest name strictly
+        greater than the real predecessor and still below `name`. With the
+        default '~' sentinel this snap can only happen when a real name
+        contains a '~'-or-higher octet at the relevant position, so normal
+        zones never snap and never reveal a real name.
+        """
+        candidate = predecessor_name(name, ideal=ideal)
+        index = self.nodes.bisect_left(name) - 1
+        if index < 0:
+            return candidate                      # nothing below name; safe
+        floor = self.nodes.peekitem(index)[0]
+        if candidate <= floor:
+            # Synthetic predecessor would span or hit a real name; snap to the
+            # successor of the real floor (floor < \000.floor < name).
+            return successor_name(floor)
+        return candidate
+
+    def covering_successor(self, name):
+        """
+        Return the successor of `name` for RFC 4470 covering NSECs, guarding
+        the (pathological) case where the literal successor \000.name already
+        exists in the zone. Real \000-prefixed owners are effectively
+        nonexistent, so this is a cheap existence check with a defensive
+        fallback rather than an iterative search: if \000.name exists, fall
+        back to the predecessor of the next real name above it, which still
+        sits strictly above `name`.
+        """
+        successor = successor_name(name)
+        if self.nodes.get(successor) is None:
+            return successor
+        index = self.nodes.bisect_right(successor)
+        if index < len(self.nodes):
+            ceiling = self.nodes.peekitem(index)[0]
+            return predecessor_name(ceiling)
+        return successor                           # nothing above; use it anyway
+
     def nsec3_hash(self, name):
         """Return NSEC3 hash of name"""
 
@@ -998,6 +1046,81 @@ def make_nsec3_rrset_minimal(params, zone, owner, rrtypes, ttl, covering=False):
                             ttl)
 
 
+MAX_LABEL_OCTETS = 63
+PREDECESSOR_SENTINEL = 0x7e            # '~': sorts above LDH, '_', '*', digits
+
+
+def predecessor_label_good(label):
+    """
+    Good-enough RFC 4470 predecessor of a label: decrement the last octet and
+    append a single sentinel octet ('~', 0x7e). '~' sorts canonically above
+    every octet used in conventional labels (letters, digits, '-', '_', '*'),
+    so the resulting synthetic name excludes all normal host names while
+    printing cleanly (e.g. "fon~" rather than "fon\\255"). If the last octet is
+    already 0x00 there is no smaller value, so the label is dropped entirely
+    (the predecessor is the parent name).
+    """
+    ordinal = label[-1]
+    if ordinal == 0:
+        return label[:-1]
+    return label[:-1] + bytes([ordinal - 1, PREDECESSOR_SENTINEL])
+
+
+def predecessor_label_ideal(label):
+    """
+    Ideal (tightest) RFC 4470 predecessor of a label: decrement the last octet
+    and pad with 0xff octets out to the 63-octet maximum. This yields the
+    smallest possible covering interval but produces long, ugly owner names and
+    larger packets, so it is opt-in (see the nsec_ideal_predecessor preference).
+    """
+    ordinal = label[-1]
+    if ordinal == 0:
+        return label[:-1]
+    return label[:-1] + bytes([ordinal - 1]) + \
+        b'\xff' * (MAX_LABEL_OCTETS - len(label))
+
+
+def predecessor_name(name, ideal=False):
+    """
+    Return the (syntactic) predecessor of a domain name for RFC 4470 minimally
+    covering NSEC records. Only the first (leftmost) label is altered. This is
+    a pure name computation; collision with real zone names is resolved
+    separately by Zone.covering_predecessor().
+    """
+    fn = predecessor_label_ideal if ideal else predecessor_label_good
+    labels = name.labels
+    newlabel = fn(labels[0])
+    if not newlabel:
+        return dns.name.Name(labels[1:])
+    return dns.name.Name((newlabel,) + labels[1:])
+
+
+def successor_name(name):
+    """
+    Return the immediate successor of a domain name: the smallest name strictly
+    greater than it that shares the same parent, formed by appending a 0x00
+    octet to the leftmost label (RFC 4470/4471 "successor").
+
+    We must NOT prepend a 0x00 *label* (\\000.name) here: that makes `name` a
+    proper suffix of the successor, so a strict validator computing the closest
+    encloser from the covering NSEC's next field (RFC 4035 5.4, RFC 7129) would
+    conclude the closest encloser is `name` itself (as if it were an empty
+    non-terminal) and then demand a wildcard NSEC at *.name rather than
+    *.<real-closest-encloser> -- yielding SERVFAIL / "Missing NSEC record".
+    Appending an octet keeps the label count identical, so the successor stays
+    a sibling and the closest-encloser derivation is unaffected.
+
+    In the (pathological) case of a 63-octet leftmost label there is no room to
+    append; fall back to prepending a 0x00 label, which is still a valid strict
+    successor (only the closest-encloser subtlety above is at stake, and a
+    63-octet synthetic label cannot occur from predecessor/wildcard synthesis).
+    """
+    first = name.labels[0]
+    if len(first) < MAX_LABEL_OCTETS:
+        return dns.name.Name((first + b'\x00',) + name.labels[1:])
+    return dns.name.Name((b'\x00',) + name.labels)
+
+
 class DNSquery:
     """DNS query object"""
 
@@ -1204,8 +1327,10 @@ class DNSresponse:
                     self.nxdomain_nsec3_online_compact(zobj)
                 else:
                     self.nxdomain_nsec3_online(zobj, sname)
-            else:
+            elif zobj.compact_denial:
                 self.nxdomain_nsec_online_compact(zobj)
+            else:
+                self.nxdomain_nsec_online(zobj, sname)
             return
 
         if zobj.dnssec:
@@ -1226,6 +1351,49 @@ class DNSresponse:
         nextname = dns.name.Name((b'\x00',) + self.qname.labels)
         nsec_rrset = make_nsec_rrset(self.qname, nextname, rrtypes, zobj.soa_min_ttl)
         self.add_rrset(zobj, self.response.authority, nsec_rrset)
+
+    def nxdomain_nsec_online(self, zobj, sname):
+        """
+        Generate online NSEC NXDOMAIN response using RFC 4470 minimally
+        covering NSEC records ("white lies").
+
+        Two NSECs are synthesized: one whose interval covers the queried name,
+        and one covering the relevant wildcard (*.<closest-encloser>) to prove
+        no wildcard would have matched. Both owner names are collision-checked
+        against the real zone (Zone.covering_predecessor / covering_successor)
+        so a synthetic name never spans or denies an existing name.
+
+        The covering interval for the qname is built around the next-closer
+        name (sname = closest-encloser plus one label toward the qname), NOT the
+        full qname: (predecessor(sname), successor(sname)). A strict validator
+        reconstructs the closest encloser as the longest suffix the queried name
+        shares with the NSEC's owner OR next name (RFC 4035 5.4, RFC 7129);
+        both endpoints here are same-parent siblings of sname, so that longest
+        shared suffix is exactly sname.parent() == the closest encloser. Using
+        the full qname (which is a subdomain of sname when the qname is several
+        labels below the closest encloser) would leak extra shared labels into
+        the next name and make the validator derive too deep a closest encloser,
+        then demand a wildcard NSEC we never send -> SERVFAIL. The interval
+        (predecessor(sname), successor(sname)) still covers the whole qname,
+        since every subdomain of sname sorts between sname's predecessor and
+        successor.
+        """
+        self.response.set_rcode(dns.rcode.NXDOMAIN)
+        ideal = self.ctx.prefs.nsec_ideal_predecessor
+        rrtypes = [dns.rdatatype.RRSIG, dns.rdatatype.NSEC]
+
+        nsec_qname = make_nsec_rrset(
+            zobj.covering_predecessor(sname, ideal=ideal),
+            zobj.covering_successor(sname),
+            rrtypes, zobj.soa_min_ttl)
+        self.add_rrset(zobj, self.response.authority, nsec_qname)
+
+        wildcard = dns.name.Name((b'*',) + sname.parent().labels)
+        nsec_wildcard = make_nsec_rrset(
+            zobj.covering_predecessor(wildcard, ideal=ideal),
+            zobj.covering_successor(wildcard),
+            rrtypes, zobj.soa_min_ttl)
+        self.add_rrset(zobj, self.response.authority, nsec_wildcard)
 
     def nxdomain_nsec3_online(self, zobj, sname):
         """
@@ -1312,7 +1480,7 @@ class DNSresponse:
                 else:
                     self.nodata_nsec3_online(zobj, sname, wildcard)
             else:
-                self.nodata_nsec_online_compact(zobj, sname, wildcard)
+                self.nodata_nsec_online(zobj, sname, wildcard)
             return
 
         if zobj.dnssec:
@@ -1321,9 +1489,18 @@ class DNSresponse:
             else:
                 self.nodata_nsec3(zobj, sname, wildcard=wildcard)
 
-    def nodata_nsec_online_compact(self, zobj, sname, wildcard=None):
+    def nodata_nsec_online(self, zobj, sname, wildcard=None):
         """
-        Generate online NSEC NODATA response
+        Generate online NSEC NODATA response.
+
+        A NODATA answer proves the name exists but the type does not, so this
+        is a plain *matching* NSEC (owner = the name, bitmap = its real types
+        plus RRSIG and NSEC) -- no RFC 4470 predecessor synthesis. This is
+        identical for Compact Denial and classic white-lie zones (the compact
+        black lie applies only to NXDOMAIN, via the NXNAME bit), so a single
+        function serves both modes. Empty non-terminals are handled naturally:
+        find_node() yields an ENT's (empty) rdataset list, giving an NSEC+RRSIG
+        bitmap.
         """
 
         if wildcard:

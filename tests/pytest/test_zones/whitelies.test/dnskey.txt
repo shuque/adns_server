@@ -1,0 +1,2 @@
+; flags=257 keytag=34061
+whitelies.test. IN DNSKEY 257 3 13 obeCDXRuadqDplGvVriXRv6d2/5aFFky 7MW0QrshIrrKlpMwXaJyXMKHrWeRb93U 6dXMRDnfhXWyWJauwOUifg==

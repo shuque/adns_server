@@ -30,3 +30,12 @@ zones:
     file: "unsigned.test/zonefile"
     dnssec: false
     deleg_enabled: true
+
+  # NSEC, online signing, NO compact denial: RFC 4470 minimally-covering NSEC
+  # (online NSEC white lies). No NSEC3PARAM in the zonefile => NSEC.
+  - name: "whitelies.test"
+    file: "whitelies.test/zonefile"
+    dnssec: true
+    dynamic_signing: true
+    compact_denial: false
+    private_key: "whitelies.test/privkey.pem"
