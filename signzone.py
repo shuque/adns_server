@@ -129,8 +129,20 @@ def write_zone(zone, output_path):
     Serialize the (signed) zone. Absolute names (relativize=False). Writes
     to a temp file in the destination dir then atomically renames, so a failure
     leaves no partial .signed. output_path '-' writes to stdout.
+
+    Serialize node-by-node in canonical order, skipping empty non-terminal
+    nodes. zone_from_file() synthesizes an empty (no-rdataset) node for each
+    ENT so the server can tell NODATA from NXDOMAIN; zone.to_text() would emit
+    each as a blank line. An ENT never carries authoritative data (its NSEC3,
+    in NSEC3 mode, lives at the hashed owner, a different node), so dropping
+    empty nodes here is correct for both NSEC and NSEC3 output.
     """
-    text = zone.to_text(relativize=False)
+    parts = []
+    for name, node in zone.nodes.items():
+        node_text = node.to_text(name, relativize=False)
+        if node_text:
+            parts.append(node_text)
+    text = "\n".join(parts) + "\n"
     if output_path == '-':
         sys.stdout.write(text)
         return
