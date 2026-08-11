@@ -143,7 +143,39 @@ idempotent: signing the same file twice yields identical output modulo
 jitter/inception timestamps (and byte-identical with fixed times + `-j 0`).
 
 **SOA serial:** unchanged by default (zonefile is the source of truth);
-`--bump` opts into incrementing it.
+`--bump` opts into incrementing it. `--bump` mutates only the in-memory zone
+that becomes the signed output — `signzone.py` never writes back to the input
+zonefile. The increment is therefore relative to the *input's* serial: two
+consecutive `--bump` runs from the same unedited source both emit serial N+1
+(not N+1 then N+2).
+
+### Operator zone-update models
+
+The signer supports two workflows; the SOA-serial behavior above is deliberate
+in both.
+
+- **(i) Unsigned zone as source of truth (recommended default).** The operator
+  edits the small, hand-readable unsigned file and regenerates the `.signed`
+  file on every change; the signed file is a pure derived build artifact that
+  can be deleted and regenerated at will. `--bump` is a convenience so the
+  operator need not hand-edit the serial on each re-sign. Caveat: because
+  `--bump` is source-relative, it yields a monotonic served serial only if every
+  publish goes through it against a stable source serial. For anything that
+  compares serials over time across restarts (e.g. AXFR to secondaries),
+  advance the *source* serial rather than relying on `--bump`.
+
+- **(ii) Re-feed the signed zone (`strip_dnssec` path).** Feeding a previously
+  signed zone back in strips its DNSSEC RRs (retaining DNSKEY/NSEC3PARAM) and
+  re-signs. This is the right tool for re-signing on key rollover or expiry
+  refresh, or when the only on-disk form is the signed one. It is the wrong tool
+  for editing zone *contents*: the signed file is large and unwieldy to
+  hand-edit, and `--bump` on it walks the serial forward from the signed value.
+
+Recommended posture: treat (i) as the documented operator workflow and (ii) as
+a maintenance/re-sign mode. (A durable monotonic serial without editing the
+source — e.g. a `YYYYMMDDnn` datestamp scheme, or reading the previous
+`.signed` serial and incrementing — would be a separate feature, not the
+current `--bump` behavior.)
 
 **Exit codes:** 0 on success; nonzero with a clear stderr message on any key,
 parse, or semantic error. No partial output on error.
