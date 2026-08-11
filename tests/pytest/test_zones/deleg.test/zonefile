@@ -33,7 +33,14 @@ alias		IN	CNAME	www.deleg.test.
 ;; DNAME redirecting the "old" subtree to "new"; a query below the owner
 ;; yields DNAME + synthesized CNAME + the target's answer.
 ;;
+;; host.old is an explicit record STRICTLY BELOW the DNAME owner. Per RFC 6672
+;; it is occluded: the descent hits the DNAME at 'old' first and redirects, so
+;; this address (192.0.2.99) must never be served. It exists only so a test can
+;; prove the occlusion (that the DNAME shadows it) rather than that a name below
+;; a DNAME merely redirects.
+;;
 old		IN	DNAME	new.deleg.test.
+host.old	IN	A	192.0.2.99
 host.new	IN	A	192.0.2.40
 ;;
 ;; Delegation matrix. DELEG rdata is opaque to the server (returned as-is);
