@@ -7,7 +7,11 @@ unsigned.test zone. Signatures are cryptographically validated; NSEC/NSEC3
 proofs are checked for correct coverage and type-bitmap contents.
 """
 
+import pytest
+
 import dnsutil as du
+
+pytestmark = pytest.mark.deleg
 
 DELEG = "TYPE61440"
 NXNAME = "TYPE128"

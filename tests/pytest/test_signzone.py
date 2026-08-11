@@ -11,6 +11,8 @@ if REPO_ROOT not in sys.path:
 
 import dnssec_util  # noqa: E402
 
+pytestmark = pytest.mark.signer
+
 
 def test_key_basename_format():
     assert dnssec_util.key_basename("signer-nsec.test", 13, 34063) == \

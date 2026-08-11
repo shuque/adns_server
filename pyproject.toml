@@ -44,3 +44,7 @@ version = {attr = "adns_server.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests/pytest"]
+markers = [
+    "signer: offline zone signer (signzone.py) tests -- no running server",
+    "deleg: DELEG delegation-extension behavior tests",
+]

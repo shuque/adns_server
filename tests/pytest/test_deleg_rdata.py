@@ -24,6 +24,8 @@ sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..")))
 import deleg_rdata as dr   # noqa: E402
 
+pytestmark = pytest.mark.deleg
+
 
 # --------------------------------------------------------------------------
 # Helpers

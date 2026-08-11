@@ -217,3 +217,24 @@ python3 -m pytest tests/pytest -v
 Set `ADNS_TEST_KEEP_LOG=1` to print the server log on teardown when debugging a
 startup failure. See `tests/pytest/README.md` for details on the fixtures,
 assertion helpers, and test zones.
+
+### Running a subset of the tests
+
+The suite defines pytest markers so functional areas can be run in isolation
+with `-m`:
+
+| Marker   | Selects                                                      |
+| -------- | ----------------------------------------------------------- |
+| `signer` | offline zone signer (`signzone.py`) tests — no running server |
+| `deleg`  | DELEG delegation-extension behavior tests                   |
+
+```
+python3 -m pytest tests/pytest -m signer    # just the signer tests
+python3 -m pytest tests/pytest -m deleg     # just the DELEG tests
+python3 -m pytest tests/pytest -m "not deleg"
+```
+
+The `signer` set is self-contained and never launches the server, so it runs
+in a fraction of the full-suite time. `pytest --markers` lists the registered
+markers. You can also select by path (`tests/pytest/test_signzone*.py`) or by
+node-name substring (`-k signzone`).

@@ -23,6 +23,8 @@ sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..")))
 import adns_server as adns   # noqa: E402
 
+pytestmark = pytest.mark.deleg
+
 # A syntactically valid DELEG RRset in RFC 3597 generic format
 # (include-delegparam=config1234.example.com.), reused from the test zonefile.
 DELEG_GENERIC = ("TYPE61440 \\# 26 "

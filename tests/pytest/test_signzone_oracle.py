@@ -11,6 +11,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+pytestmark = pytest.mark.signer
+
 SIGNZONE = os.path.join(REPO_ROOT, "signzone.py")
 ZONE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_zones")
 FIXTURE_DIR = os.path.join(ZONE_DIR, "signer-nsec.test")
