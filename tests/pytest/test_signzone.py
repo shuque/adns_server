@@ -32,7 +32,11 @@ def test_genkey_keydir_writes_triple(tmp_path):
     assert len(pems) == 1, result.stdout
     base = pems[0].name[:-4]  # strip .pem
     assert (keydir / (base + ".dnskey")).exists()
-    assert (keydir / (base + ".ds")).exists()
+    ds_path = keydir / (base + ".ds")
+    assert ds_path.exists()
+    assert ds_path.read_text().startswith("signer-nsec.test. IN DS ")
+    # Private key file is owner-only (0600).
+    assert (pems[0].stat().st_mode & 0o777) == 0o600
     # Private key loads and DNSKEY parses; keytag in filename matches the key.
     import dns.rdata
     import dns.rdataclass

@@ -84,12 +84,13 @@ def write_key_triple(keydir, zone, algorithm, keytag, private_key,
     pem_path = os.path.join(keydir, basename + ".pem")
     with open(pem_path, "w", encoding="utf-8") as f:
         f.write(pem_data_for_private_key(private_key))
+    os.chmod(pem_path, 0o600)
     with open(os.path.join(keydir, basename + ".dnskey"), "w",
               encoding="utf-8") as f:
         f.write(dnskey_rrset.to_text() + "\n")
     with open(os.path.join(keydir, basename + ".ds"), "w",
               encoding="utf-8") as f:
-        f.write(ds_rr.to_text(zone) + "\n")
+        f.write(f"{zone.to_text()} IN DS {ds_rr.to_text()}\n")
     return basename
 
 
