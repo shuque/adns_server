@@ -18,7 +18,7 @@ def test_dnssec_util_exposes_moved_symbols():
                  "make_nsec_rrset", "make_nsec3_rrset", "load_private_key",
                  "Zone", "zone_from_file", "MAX_LABEL_OCTETS",
                  "PREDECESSOR_SENTINEL", "B32_TO_EXT_HEX",
-                 "NSEC3HASH_SIZE_IN_OCTETS"):
+                 "NSEC3HASH_SIZE_IN_OCTETS", "key_basename"):
         assert hasattr(dnssec_util, name), f"dnssec_util missing {name}"
 
 

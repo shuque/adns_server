@@ -44,6 +44,14 @@ def load_private_key(keyfile):
         return load_pem_private_key(fkeyfile.read(), password=None)
 
 
+def key_basename(zonename, algorithm, keytag):
+    """Return the keytag-named base filename (no extension) shared by genkey
+    and signzone: '<zonename>+<alg:03d>+<keytag:05d>'. zonename must be the
+    origin text with any trailing dot stripped. Matches BIND's +%03d+%05d
+    convention so the files are greppable and self-describing."""
+    return f"{zonename}+{algorithm:03d}+{keytag:05d}"
+
+
 class Zone(dns.zone.Zone):
 
     """

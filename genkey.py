@@ -7,11 +7,18 @@ online DNSSEC signing.
 """
 
 import argparse
+import os
 import dns.name
 import dns.dnssec
+import dns.rrset
+import dns.rdataset
+import dns.rdataclass
+import dns.rdatatype
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric import ed25519
+
+from dnssec_util import key_basename
 
 
 ECDSA_CURVE = ec.SECP256R1()
@@ -31,6 +38,8 @@ def process_arguments():
     parser.add_argument("-f", type=int, dest='flags', metavar='N',
                         default=257,
                         help="Value of DNSKEY flags field (default: %(default)d)")
+    parser.add_argument("-K", "--keydir", metavar='DIR', default=None,
+                        help="write keytag-named .pem/.dnskey/.ds triple here")
     return parser.parse_args()
 
 
@@ -57,6 +66,33 @@ def pem_data_for_private_key(key):
     return serialized_private.decode()
 
 
+def build_dnskey_rrset(zone, dnskey_rdata):
+    """Build the apex DNSKEY RRset (single key) for printing / .dnskey output."""
+    rrset = dns.rrset.RRset(zone, dns.rdataclass.IN, dns.rdatatype.DNSKEY)
+    rdataset = dns.rdataset.Rdataset(dns.rdataclass.IN, dns.rdatatype.DNSKEY,
+                                     ttl=TTL)
+    rdataset.add(dnskey_rdata)
+    rrset.update(rdataset)
+    return rrset
+
+
+def write_key_triple(keydir, zone, algorithm, keytag, private_key,
+                     dnskey_rrset, ds_rr):
+    """Write <basename>.pem/.dnskey/.ds into keydir. zone is a dns.name.Name."""
+    os.makedirs(keydir, exist_ok=True)
+    basename = key_basename(zone.to_text().rstrip('.'), algorithm, keytag)
+    pem_path = os.path.join(keydir, basename + ".pem")
+    with open(pem_path, "w", encoding="utf-8") as f:
+        f.write(pem_data_for_private_key(private_key))
+    with open(os.path.join(keydir, basename + ".dnskey"), "w",
+              encoding="utf-8") as f:
+        f.write(dnskey_rrset.to_text() + "\n")
+    with open(os.path.join(keydir, basename + ".ds"), "w",
+              encoding="utf-8") as f:
+        f.write(ds_rr.to_text(zone) + "\n")
+    return basename
+
+
 if __name__ == '__main__':
 
     CONFIG = process_arguments()
@@ -72,21 +108,21 @@ if __name__ == '__main__':
                                           PROTOCOL)
     print("### DNSKEY RDATA:")
     print(dnskey_rdata)
-    print("### DNSKEY keytag:", dns.dnssec.key_id(dnskey_rdata))
+    keytag = dns.dnssec.key_id(dnskey_rdata)
+    print("### DNSKEY keytag:", keytag)
     print('')
 
-    dnskey_rrset = dns.rrset.RRset(ZONE,
-                                   dns.rdataclass.IN,
-                                   dns.rdatatype.DNSKEY)
-    dnskey_rdataset = dns.rdataset.Rdataset(dns.rdataclass.IN,
-                                            dns.rdatatype.DNSKEY,
-                                            ttl=TTL)
-    dnskey_rdataset.add(dnskey_rdata)
-    dnskey_rrset.update(dnskey_rdataset)
+    DNSKEY_RRSET = build_dnskey_rrset(ZONE, dnskey_rdata)
     print("### DNSKEY RRset:")
-    print(dnskey_rrset)
+    print(DNSKEY_RRSET)
     print('')
 
     ds = dns.dnssec.make_ds(ZONE, dnskey_rdata, algorithm=2)
     print("### DS record")
     print(ds)
+
+    if CONFIG.keydir:
+        BASENAME = write_key_triple(CONFIG.keydir, ZONE, CONFIG.algorithm,
+                                    keytag, PRIVATE_KEY, DNSKEY_RRSET, ds)
+        print('')
+        print(f"### Wrote key files: {BASENAME}.{{pem,dnskey,ds}}")
