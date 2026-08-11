@@ -36,7 +36,7 @@ Homepage = "https://github.com/shuque/check_zone_dnssec"
 Issues = "https://github.com/shuque/check_zone_dnssec/issues"
 
 [tool.setuptools]
-py-modules = []
+py-modules = ["dnssec_util"]
 script-files = ['adns_server.py']
 
 [tool.setuptools.dynamic]
