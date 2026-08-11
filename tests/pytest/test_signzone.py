@@ -482,3 +482,87 @@ def test_nsec3_chain_is_closed_and_hash_sorted():
         assert n3[owner].next == _label_to_hash(follow_label), (owner, i)
     # The apex is part of the chain.
     assert _hashed(zone, zone.origin) in n3
+
+
+# --------------------------------------------------------------------------
+# Two-key KSK(257)/ZSK(256) mode (BIND dnssec-signzone -S -x): the DNSKEY
+# RRset is signed only by the SEP key, everything else only by the ZSK. This
+# is the shape of the real m1/m3.huque.com zones. NSEC3 + salt + iterations.
+# --------------------------------------------------------------------------
+
+TWOKEY_ZONE_NAME = "signer-2key.test"
+
+
+def _sign_2key_fixture(jitter=0):
+    """Load, strip, and sign the two-key fixture in memory; return (zone, keys)."""
+    sz = _signzone()
+    cwd = os.getcwd()
+    os.chdir(ZONE_DIR)
+    try:
+        zone = dnssec_util.zone_from_file(
+            dns.name.from_text(TWOKEY_ZONE_NAME), "signer-2key.test/zonefile")
+    finally:
+        os.chdir(cwd)
+    keydir = os.path.join(ZONE_DIR, "signer-2key.test")
+    keys = sz.discover_keys(zone, keydir)
+    sz.strip_dnssec(zone)
+    now = 1_700_000_000
+    sz.sign_zone(zone, keys, now - 3600, now + 2592000, jitter)
+    return zone, keys
+
+
+def _keytags_of_covering_rrsigs(node, covered):
+    """Set of key_tags of the RRSIGs at `node` that cover rdtype `covered`."""
+    tags = set()
+    for rds in node.rdatasets:
+        if rds.rdtype == dns.rdatatype.RRSIG and rds.covers == covered:
+            for rrsig in rds:
+                tags.add(rrsig.key_tag)
+    return tags
+
+
+def test_2key_discovers_both_keys():
+    zone, keys = _sign_2key_fixture()
+    assert len(keys) == 2
+    sep = [k for k in keys if k.is_sep]
+    zsk = [k for k in keys if not k.is_sep]
+    assert len(sep) == 1 and len(zsk) == 1        # one KSK, one ZSK
+    assert all(k.private_key is not None for k in keys)   # both active
+    assert zone.get_rdataset(zone.origin, dns.rdatatype.NSEC3PARAM)
+
+
+def test_2key_dnskey_signed_by_ksk_rest_by_zsk():
+    # The core of the split: DNSKEY is signed only by the SEP key; other
+    # RRsets (SOA, A, ...) only by the ZSK. (dnssec-signzone -x / classify_signers.)
+    zone, keys = _sign_2key_fixture()
+    ksk_tag = next(k.keytag for k in keys if k.is_sep)
+    zsk_tag = next(k.keytag for k in keys if not k.is_sep)
+    origin = zone.origin
+    apex = zone.get_node(origin)
+    assert _keytags_of_covering_rrsigs(apex, dns.rdatatype.DNSKEY) == {ksk_tag}
+    assert _keytags_of_covering_rrsigs(apex, dns.rdatatype.SOA) == {zsk_tag}
+    www = zone.get_node(dns.name.from_text("www." + TWOKEY_ZONE_NAME + "."))
+    assert _keytags_of_covering_rrsigs(www, dns.rdatatype.A) == {zsk_tag}
+
+
+def test_2key_signed_rrsets_validate():
+    import dns.rrset
+    zone, _keys = _sign_2key_fixture()
+    origin = zone.origin
+    dnskey_rrset = _dnskey_rrset_of(zone)
+    checked = 0
+    for name, node in zone.nodes.items():
+        for rrsig_ds in [r for r in node.rdatasets
+                         if r.rdtype == dns.rdatatype.RRSIG]:
+            covered = rrsig_ds.covers
+            rrset = dns.rrset.RRset(name, dns.rdataclass.IN, covered)
+            rrset.update(node.get_rdataset(dns.rdataclass.IN, covered))
+            rrsig = dns.rrset.RRset(name, dns.rdataclass.IN,
+                                    dns.rdatatype.RRSIG, covered)
+            rrsig.update(rrsig_ds)
+            # Both keys are in the apex DNSKEY RRset, so validate() finds the
+            # right one for each RRSIG regardless of KSK/ZSK role.
+            dns.dnssec.validate(rrset, rrsig, {origin: dnskey_rrset},
+                                now=1_700_000_000)
+            checked += 1
+    assert checked >= 6
