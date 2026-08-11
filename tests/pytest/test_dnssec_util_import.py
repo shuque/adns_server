@@ -33,3 +33,16 @@ def test_successor_appends_zero_octet():
     name = dns.name.from_text("sub5.example.")
     succ = dnssec_util.successor_name(name)
     assert succ.labels[0] == b"sub5\x00"
+
+
+def test_adns_server_reexports_moved_symbols():
+    import adns_server
+    for name in ("RRtype", "AUTH_IN_PARENT_RRTYPES", "successor_name",
+                 "predecessor_name", "predecessor_label_good",
+                 "predecessor_label_ideal", "Zone", "ZoneDict",
+                 "nsec3hash", "zone_from_file", "make_nsec_rrset",
+                 "load_private_key"):
+        assert hasattr(adns_server, name), f"adns_server missing {name}"
+    # Re-exported objects must be the SAME objects as in dnssec_util
+    assert adns_server.Zone is dnssec_util.Zone
+    assert adns_server.successor_name is dnssec_util.successor_name
