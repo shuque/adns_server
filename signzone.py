@@ -15,6 +15,7 @@ stand-by keys) and DELEG cut handling are later stages. See Signer.md.
 """
 
 import argparse
+import binascii
 import calendar
 import collections
 import os
@@ -446,8 +447,6 @@ def make_arg_parser():
                         help="+/- jitter applied per-RRSIG (default: 6h)")
     parser.add_argument("--bump", action="store_true",
                         help="increment the SOA serial")
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="per-RRset signing trace to stderr")
     return parser
 
 
@@ -462,6 +461,93 @@ def bump_serial(zone):
     ttl = soa_rdataset.ttl
     soa_rdataset.clear()
     soa_rdataset.add(new, ttl=ttl)
+
+
+def _key_role(key, has_separate_zsk):
+    """
+    KSK/ZSK/CSK label for a discovered key: a non-SEP key is a ZSK, a SEP key
+    is a KSK, unless it is the sole signer (no separate ZSK present) and so acts
+    as a combined-signing key (CSK). Mirrors classify_signers().
+    """
+    if not key.is_sep:
+        return "ZSK"
+    return "KSK" if has_separate_zsk else "CSK"
+
+
+def _alg_keyids(keys):
+    """
+    Render the active signing keys grouped by algorithm, keytags listed under
+    each: 'ECDSAP256SHA256 (keyid 47571), RSASHA256 (keyid 12345)'. Groups in
+    first-seen algorithm order so a single-algorithm zone reads naturally and a
+    multi-algorithm zone stays unambiguous about which keytag signs with which.
+    """
+    by_alg = collections.OrderedDict()
+    for key in keys:
+        if key.private_key is None:
+            continue
+        alg = dns.dnssec.algorithm_to_text(key.algorithm)
+        by_alg.setdefault(alg, []).append(str(key.keytag))
+    return ", ".join(f"{alg} (keyid {', '.join(tags)})"
+                     for alg, tags in by_alg.items())
+
+
+def _denial_summary(zone):
+    """One-line description of the zone's authenticated-denial mode."""
+    params = _nsec3param(zone)
+    if params is None:
+        return "NSEC"
+    salt = binascii.hexlify(params.salt).decode().upper() or "-"
+    return f"NSEC3 ({params.iterations} iterations, salt {salt})"
+
+
+def print_summary(zone, keys, keydir, output_path, out=sys.stderr):
+    """
+    Emit a succinct signing summary (dnssec-signzone style) to stderr: the
+    active keys loaded, the signing algorithm(s), the denial-of-existence mode,
+    and per-algorithm active/present key counts. "active" = published DNSKEY
+    with a matching PEM (used to sign); "present" = published but publish-only,
+    no PEM. The output path (if not stdout) is printed to stdout so the tool
+    stays scriptable.
+    """
+    zonename = zone.origin.to_text().rstrip('.')
+    has_separate_zsk = any(not k.is_sep and k.private_key is not None
+                           for k in keys)
+    for key in keys:
+        if key.private_key is None:
+            continue
+        alg = dns.dnssec.algorithm_to_text(key.algorithm)
+        print(f"Loading {zonename}/{alg}/{key.keytag} "
+              f"({_key_role(key, has_separate_zsk)}) from {keydir}", file=out)
+    print(f"Signing zone {zonename} with "
+          f"algorithm(s): {_alg_keyids(keys)}", file=out)
+    print(f"Denial of existence: {_denial_summary(zone)}", file=out)
+    print("Zone signed:", file=out)
+    _print_key_counts(keys, has_separate_zsk, out)
+    if output_path != '-':
+        print(output_path)
+
+
+def _print_key_counts(keys, has_separate_zsk, out):
+    """
+    Print per-algorithm active/present key counts, one line per role
+    (KSK/ZSK/CSK), continuation lines aligned under the first. Called by
+    print_summary().
+    """
+    counts = collections.OrderedDict()
+    for key in keys:
+        alg = dns.dnssec.algorithm_to_text(key.algorithm)
+        role = _key_role(key, has_separate_zsk)
+        pair = counts.setdefault(alg, collections.OrderedDict()).setdefault(
+            role, [0, 0])
+        pair[0 if key.private_key is not None else 1] += 1
+    for alg, roles in counts.items():
+        prefix = f"Algorithm: {alg}: "
+        indent = " " * len(prefix)
+        for i, role in enumerate(r for r in ("KSK", "ZSK", "CSK")
+                                 if r in roles):
+            active, present = roles[role]
+            print(f"{prefix if i == 0 else indent}"
+                  f"{role}s: {active} active, {present} present", file=out)
 
 
 def main(argv=None):
@@ -480,6 +566,7 @@ def main(argv=None):
         sign_zone(zone, keys, inception, expiration, jitter)
         output = args.output or (args.zonefile + ".signed")
         write_zone(zone, output)
+        print_summary(zone, keys, args.keydir, output)
     except SignerError as exc:
         print(f"signzone: {exc}", file=sys.stderr)
         return 1
