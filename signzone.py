@@ -3,12 +3,15 @@
 """
 Offline DELEG-aware DNSSEC zone signer for adns_server.
 
-Single CSK. Strips any existing DNSSEC records and re-signs from scratch with
-explicit absolute RRSIG times, writing <zonefile>.signed atomically. The mode
-of authenticated denial is data-driven: an apex NSEC3PARAM record makes the
-signer build an NSEC3 chain (using that record's parameters), otherwise it
-builds an NSEC chain. Multi-key rollover and DELEG cut handling are later
-stages. See Signer.md.
+Strips any existing DNSSEC records and re-signs from scratch with explicit
+absolute RRSIG times, writing <zonefile>.signed atomically. Keys are
+discovered from the keydir by matching each apex DNSKEY to a PEM: the SEP
+key(s) sign the DNSKEY RRset and the ZSK(s) sign everything else, so a
+KSK/ZSK split or a single combined-signing key (CSK) both work with no
+flag. The mode of authenticated denial is data-driven: an apex NSEC3PARAM
+record makes the signer build an NSEC3 chain (using that record's
+parameters), otherwise it builds an NSEC chain. Key rollover (pre-published
+stand-by keys) and DELEG cut handling are later stages. See Signer.md.
 """
 
 import argparse
@@ -427,7 +430,7 @@ def sign_zone(zone, keys, inception, base_expiration, jitter):
 def make_arg_parser():
     """Build the signzone.py argument parser (Signer.md §2)."""
     parser = argparse.ArgumentParser(
-        description="Offline DNSSEC zone signer (NSEC, single CSK).")
+        description="Offline DNSSEC zone signer (NSEC/NSEC3, KSK/ZSK or CSK).")
     parser.add_argument("zonename", help="zone origin (e.g. example.com)")
     parser.add_argument("zonefile", help="unsigned zone file")
     parser.add_argument("-K", "--keydir", default=".",
