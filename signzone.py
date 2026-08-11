@@ -97,7 +97,12 @@ def discover_keys(zone, keydir):
         pem = os.path.join(keydir,
                            key_basename(zonename, rdata.algorithm, keytag)
                            + ".pem")
-        private_key = load_private_key(pem) if os.path.exists(pem) else None
+        private_key = None
+        if os.path.exists(pem):
+            try:
+                private_key = load_private_key(pem)
+            except (ValueError, OSError) as exc:
+                raise SignerError(f"cannot load private key {pem!r}: {exc}") from exc
         keys.append(KeyInfo(rdata, keytag, rdata.algorithm,
                             bool(rdata.flags & SEP_BIT), private_key))
     if not any(k.private_key is not None for k in keys):
@@ -296,9 +301,14 @@ def make_arg_parser():
 
 
 def bump_serial(zone):
-    """Increment the apex SOA serial (RFC 1982 wrap not handled; +1)."""
+    """Increment the apex SOA serial (RFC 1982 wrap not handled; +1).
+    dnspython Rdata is immutable, so replace the rdata rather than mutating."""
     soa_rdataset = zone.get_rdataset(zone.origin, dns.rdatatype.SOA)
-    soa_rdataset[0].serial = (soa_rdataset[0].serial + 1) & 0xFFFFFFFF
+    old = soa_rdataset[0]
+    new = old.replace(serial=(old.serial + 1) & 0xFFFFFFFF)
+    ttl = soa_rdataset.ttl
+    soa_rdataset.clear()
+    soa_rdataset.add(new, ttl=ttl)
 
 
 def main(argv=None):
@@ -322,6 +332,9 @@ def main(argv=None):
         return 1
     except dns.exception.DNSException as exc:
         print(f"signzone: zone load/parse error: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"signzone: {exc}", file=sys.stderr)
         return 1
     return 0
 

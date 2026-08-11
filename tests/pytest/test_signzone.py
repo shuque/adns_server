@@ -57,7 +57,6 @@ import dns.rdatatype     # noqa: E402
 
 ZONE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_zones")
 NSEC_ZONE_NAME = "signer-nsec.test"
-NSEC_ZONE_FILE = os.path.join(ZONE_DIR, "signer-nsec.test", "zonefile")
 
 
 def _load_fixture():
@@ -253,3 +252,29 @@ def test_nsec_bitmap_includes_present_types():
     for rdtype in (dns.rdatatype.SOA, dns.rdatatype.NS, dns.rdatatype.DNSKEY,
                    dns.rdatatype.NSEC, dns.rdatatype.RRSIG):
         assert rdtype in present
+
+
+def test_bump_serial_increments_soa():
+    # dnspython Rdata (incl. SOA) is immutable on 2.7.0+; bump_serial must
+    # replace the rdata rather than mutating soa_rdataset[0].serial in place
+    # (that raises TypeError: object doesn't support attribute assignment).
+    sz = _signzone()
+    zone = _load_fixture()
+    origin = zone.origin
+    before = zone.get_rdataset(origin, dns.rdatatype.SOA)[0].serial
+    assert before == 1          # fixture's starting serial
+    sz.bump_serial(zone)
+    after = zone.get_rdataset(origin, dns.rdatatype.SOA)[0].serial
+    assert after == before + 1
+
+
+def test_discover_keys_bad_pem_raises_signer_error(tmp_path):
+    sz = _signzone()
+    zone = _load_fixture()
+    # Keytag 55608 matches the fixture's DNSKEY (see
+    # signer-nsec.test+013+55608.pem); discover_keys must find this file by
+    # name and fail to parse it as a private key.
+    bad_pem = tmp_path / "signer-nsec.test+013+55608.pem"
+    bad_pem.write_text("not a valid PEM key\n")
+    with pytest.raises(sz.SignerError):
+        sz.discover_keys(zone, str(tmp_path))
