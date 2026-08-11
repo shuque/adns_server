@@ -205,10 +205,20 @@ def test_cut_authority_rule():
     node = zone.get_node(sub)
     covers = {r.covers for r in node.rdatasets
               if r.rdtype == dns.rdatatype.RRSIG}
-    # DS and NSEC signed at the cut; NS is NOT.
+    # DS and NSEC signed at the cut; NS is NOT. A data RRset (TXT) sitting at
+    # the cut is occluded parent-side data: it must NOT be signed.
     assert dns.rdatatype.DS in covers
     assert dns.rdatatype.NSEC in covers
     assert dns.rdatatype.NS not in covers
+    assert dns.rdatatype.TXT not in covers
+    # The cut's NSEC bitmap lists only the parent-visible types (NS/DS/RRSIG/
+    # NSEC); the occluded TXT must not leak into it (would break validation --
+    # BIND dnssec-verify rejects the extra bit).
+    nsec = node.get_rdataset(dns.rdataclass.IN, dns.rdatatype.NSEC)[0]
+    bitmap = _nsec_types(nsec)
+    assert dns.rdatatype.TXT not in bitmap
+    assert {dns.rdatatype.NS, dns.rdatatype.DS,
+            dns.rdatatype.RRSIG, dns.rdatatype.NSEC} <= bitmap
     # Occluded glue below the cut is neither signed nor NSEC'd.
     glue = dns.name.from_text("ns1.sub." + NSEC_ZONE_NAME + ".")
     gnode = zone.get_node(glue)
@@ -415,6 +425,24 @@ def test_nsec3_excludes_occluded_names():
         name = dns.name.from_text(occluded + "." + NSEC3_ZONE_NAME + ".")
         assert _hashed(zone, name) not in n3, \
             f"{occluded} must not have an NSEC3"
+
+
+def test_nsec3_cut_bitmap_excludes_occluded_data():
+    # A data RRset (TXT) sitting at a delegation cut is occluded parent-side
+    # data: it must not be signed, and must not appear in the cut's NSEC3 type
+    # bitmap (only NS/DS/RRSIG do). Regression for the m3.huque.com 'newsub'
+    # case where a private-type record at a secure cut leaked into the bitmap
+    # and BIND dnssec-verify rejected the chain.
+    zone, _keys = _sign_nsec3_fixture()
+    sub = dns.name.from_text("sub." + NSEC3_ZONE_NAME + ".")
+    covers = {r.covers for r in zone.get_node(sub).rdatasets
+              if r.rdtype == dns.rdatatype.RRSIG}
+    assert dns.rdatatype.TXT not in covers
+    owner = _hashed(zone, sub)
+    n3 = _nsec3_records(zone)
+    bitmap = _nsec_types(n3[owner])
+    assert dns.rdatatype.TXT not in bitmap
+    assert {dns.rdatatype.NS, dns.rdatatype.DS, dns.rdatatype.RRSIG} <= bitmap
 
 
 def test_nsec3_dname_owner_is_hashed_and_signed():

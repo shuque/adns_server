@@ -33,9 +33,12 @@ host.deep.ent	IN	A	192.0.2.30
 ;;
 ;; Traditional secure delegation with IN-ZONE glue below the cut.
 ;; 'sub' is a cut (NS+DS); ns1.sub is occluded glue: not signed, no NSEC3.
+;; The TXT sitting AT the cut is occluded parent-side data: it must be neither
+;; signed nor listed in the cut's NSEC3 type bitmap (only NS/DS/RRSIG are).
 ;;
 sub		IN	NS	ns1.sub.signer-nsec3.test.
 sub		IN	DS	40524 13 2 0000000000000000000000000000000000000000000000000000000000000001
+sub		IN	TXT	"occluded at the cut"
 ns1.sub		IN	A	192.0.2.2
 ;;
 ;; DNAME (RFC 6672): 'dname' is authoritative (its DNAME RRset is signed and it

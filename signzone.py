@@ -267,6 +267,23 @@ def _rrsets_to_sign(name, node, is_cut):
         yield rrset
 
 
+def _bitmap_rdtypes(node, is_cut):
+    """
+    RR types present at a node that belong in its NSEC/NSEC3 type bitmap. At a
+    delegation cut only the delegation's parent-side types are visible -- NS,
+    the authoritative-in-parent types (DS/DELEG), and any RRSIG covering them;
+    other RRsets sitting at the cut (e.g. a leftover private-type record) are
+    occluded and excluded, mirroring _rrsets_to_sign(). Elsewhere every present
+    type is listed. The NSEC/NSEC3 and its RRSIG are added by the caller.
+    """
+    types = {rds.rdtype for rds in node.rdatasets}
+    if is_cut:
+        allowed = ({dns.rdatatype.NS, dns.rdatatype.RRSIG}
+                   | set(AUTH_IN_PARENT_RRTYPES))
+        types &= allowed
+    return types
+
+
 def _add_rrsig(node, rrset, rrsig):
     """Attach an RRSIG rdata (covering rrset.rdtype) to node."""
     rdataset = node.find_rdataset(dns.rdataclass.IN, dns.rdatatype.RRSIG,
@@ -299,15 +316,14 @@ def _sign_authoritative_rrsets(zone, cut_names, occluding_parents,  # pylint: di
                             inception, base_expiration, jitter)
 
 
-def _build_nsec_chain(zone, occluding_parents, rest_signers,     # pylint: disable=too-many-positional-arguments
+def _build_nsec_chain(zone, cut_names, occluding_parents, rest_signers,  # pylint: disable=too-many-positional-arguments
                       inception, base_expiration, jitter):
     """Build and sign the NSEC chain over authoritative owners."""
     owners = authoritative_owners(zone, occluding_parents)
     for i, owner in enumerate(owners):
         node = zone.get_node(owner)
         nextname = owners[(i + 1) % len(owners)]
-        present = {rds.rdtype for rds in node.rdatasets
-                   if rds.rdtype != dns.rdatatype.NSEC}
+        present = _bitmap_rdtypes(node, owner in cut_names)
         present.add(dns.rdatatype.NSEC)
         present.add(dns.rdatatype.RRSIG)
         nsec_rrset = make_nsec_rrset(owner, nextname, sorted(present),
@@ -347,13 +363,12 @@ def nsec3_owners(zone, occluding_parents):
     return sorted(owners)
 
 
-def _build_nsec3_chain(zone, params, occluding_parents, rest_signers,  # pylint: disable=too-many-positional-arguments
-                       inception, base_expiration, jitter):
+def _nsec3_entries(zone, params, cut_names, occluding_parents):
     """
-    Build and sign the NSEC3 chain in hash-sorted order. Because NSEC3 sorts by
-    hash, this is a separate pass from the name-sorted signing walk: hash every
-    owner (incl. ENTs), sort by hash, then link each hashed owner's next field
-    to the following hash (wrapping to the smallest -- a closed loop).
+    (binary_hash, hashed_owner_name, bitmap) for every NSEC3 owner, sorted by
+    hash. Owners include ENTs (RFC 5155 7.1); the bitmap is the original name's
+    visible types (occluded records at a cut dropped, per _bitmap_rdtypes) and
+    never the NSEC3 bit itself. ENTs own nothing -> empty bitmap.
     """
     entries = []
     for name in nsec3_owners(zone, occluding_parents):
@@ -363,12 +378,21 @@ def _build_nsec3_chain(zone, params, occluding_parents, rest_signers,  # pylint:
         h_bin = nsec3hash(name, params.algorithm, params.salt,
                           params.iterations, binary_out=True)
         hashed_owner = dns.name.Name((h_str.encode(),) + zone.origin.labels)
-        # Bitmap = the original name's present types (RRSIG included exactly
-        # when the name has signed data); never the NSEC3 bit (it is not set on
-        # the node itself, RFC 5155 7.1). ENTs own nothing -> empty bitmap.
-        bitmap = sorted(rds.rdtype for rds in node.rdatasets)
+        bitmap = sorted(_bitmap_rdtypes(node, name in cut_names))
         entries.append((h_bin, hashed_owner, bitmap))
     entries.sort(key=lambda entry: entry[0])
+    return entries
+
+
+def _build_nsec3_chain(zone, params, cut_names, occluding_parents, rest_signers,  # pylint: disable=too-many-positional-arguments
+                       inception, base_expiration, jitter):
+    """
+    Build and sign the NSEC3 chain in hash-sorted order. Because NSEC3 sorts by
+    hash, this is a separate pass from the name-sorted signing walk: hash every
+    owner (incl. ENTs), sort by hash, then link each hashed owner's next field
+    to the following hash (wrapping to the smallest -- a closed loop).
+    """
+    entries = _nsec3_entries(zone, params, cut_names, occluding_parents)
     count = len(entries)
     for i, (_h_bin, hashed_owner, bitmap) in enumerate(entries):
         next_hash = entries[(i + 1) % count][0]
@@ -393,10 +417,10 @@ def sign_zone(zone, keys, inception, base_expiration, jitter):
                                inception, base_expiration, jitter)
     params = _nsec3param(zone)
     if params is not None:
-        _build_nsec3_chain(zone, params, occluding_parents, rest_signers,
-                           inception, base_expiration, jitter)
+        _build_nsec3_chain(zone, params, cut_names, occluding_parents,
+                           rest_signers, inception, base_expiration, jitter)
     else:
-        _build_nsec_chain(zone, occluding_parents, rest_signers,
+        _build_nsec_chain(zone, cut_names, occluding_parents, rest_signers,
                           inception, base_expiration, jitter)
 
 
