@@ -143,3 +143,113 @@ def test_strip_removes_dnssec_records():
         for rds in node.rdatasets:
             assert rds.rdtype not in (dns.rdatatype.RRSIG, dns.rdatatype.NSEC,
                                       dns.rdatatype.NSEC3)
+
+
+import dns.dnssec       # noqa: E402
+
+
+def _sign_fixture(inception=None, expiration=None, jitter=0):
+    """Load, strip, and sign the fixture in memory; return the signed Zone."""
+    sz = _signzone()
+    zone = _load_fixture()
+    keydir = os.path.join(ZONE_DIR, "signer-nsec.test")
+    keys = sz.discover_keys(zone, keydir)
+    sz.strip_dnssec(zone)
+    now = 1_700_000_000
+    inc = inception if inception is not None else now - 3600
+    exp = expiration if expiration is not None else now + 2592000
+    sz.sign_zone(zone, keys, inc, exp, jitter)
+    return zone, keys
+
+
+def _dnskey_rrset_of(zone):
+    origin = zone.origin
+    rdataset = zone.get_rdataset(origin, dns.rdatatype.DNSKEY)
+    rrset = dns.rrset.RRset(origin, dns.rdataclass.IN, dns.rdatatype.DNSKEY)
+    rrset.update(rdataset)
+    return rrset
+
+
+def test_signed_rrsets_validate():
+    import dns.rrset
+    zone, _keys = _sign_fixture()
+    origin = zone.origin
+    dnskey_rrset = _dnskey_rrset_of(zone)
+    checked = 0
+    for name, node in zone.nodes.items():
+        rrsig_sets = [r for r in node.rdatasets
+                      if r.rdtype == dns.rdatatype.RRSIG]
+        for rrsig_ds in rrsig_sets:
+            covered = rrsig_ds.covers
+            covered_ds = node.get_rdataset(dns.rdataclass.IN, covered)
+            rrset = dns.rrset.RRset(name, dns.rdataclass.IN, covered)
+            rrset.update(covered_ds)
+            rrsig = dns.rrset.RRset(name, dns.rdataclass.IN,
+                                    dns.rdatatype.RRSIG, covered)
+            rrsig.update(rrsig_ds)
+            # Fixed 'now' matching _sign_fixture()'s inception/expiration
+            # epoch: dns.dnssec.validate() defaults to the real wall clock,
+            # which would spuriously report "expired" once real time drifts
+            # past the fixture's fixed signing window.
+            dns.dnssec.validate(rrset, rrsig, {origin: dnskey_rrset},
+                                now=1_700_000_000)
+            checked += 1
+    assert checked >= 6      # apex SOA/NS/DNSKEY + A's + DS + NSECs
+
+
+def test_cut_authority_rule():
+    zone, _keys = _sign_fixture()
+    sub = dns.name.from_text("sub." + NSEC_ZONE_NAME + ".")
+    node = zone.get_node(sub)
+    covers = {r.covers for r in node.rdatasets
+              if r.rdtype == dns.rdatatype.RRSIG}
+    # DS and NSEC signed at the cut; NS is NOT.
+    assert dns.rdatatype.DS in covers
+    assert dns.rdatatype.NSEC in covers
+    assert dns.rdatatype.NS not in covers
+    # Occluded glue below the cut is neither signed nor NSEC'd.
+    glue = dns.name.from_text("ns1.sub." + NSEC_ZONE_NAME + ".")
+    gnode = zone.get_node(glue)
+    gcovers = {r.rdtype for r in gnode.rdatasets}
+    assert dns.rdatatype.RRSIG not in gcovers
+    assert dns.rdatatype.NSEC not in gcovers
+
+
+def test_nsec_chain_closed_and_excludes_ents():
+    zone, _keys = _sign_fixture()
+    origin = zone.origin
+    # Collect NSEC owners and their next names.
+    owners, nexts = [], {}
+    for name, node in zone.nodes.items():
+        nsec_ds = node.get_rdataset(dns.rdataclass.IN, dns.rdatatype.NSEC)
+        if nsec_ds is not None:
+            owners.append(name)
+            nexts[name] = nsec_ds[0].next
+    owners_sorted = sorted(owners)
+    # ENTs excluded.
+    ent = dns.name.from_text("deep.ent." + NSEC_ZONE_NAME + ".")
+    assert ent not in nexts
+    # Occluded glue excluded.
+    glue = dns.name.from_text("ns1.sub." + NSEC_ZONE_NAME + ".")
+    assert glue not in nexts
+    # Closed loop: each owner's next is the following owner; last -> apex.
+    for i, owner in enumerate(owners_sorted):
+        expected = owners_sorted[(i + 1) % len(owners_sorted)]
+        assert nexts[owner] == expected, (owner, nexts[owner], expected)
+    assert origin in owners
+
+
+def test_nsec_bitmap_includes_present_types():
+    zone, _keys = _sign_fixture()
+    origin = zone.origin
+    node = zone.get_node(origin)
+    nsec = node.get_rdataset(dns.rdataclass.IN, dns.rdatatype.NSEC)[0]
+    present = set()
+    for window, bitmap in nsec.windows:
+        for i, byte in enumerate(bitmap):
+            for bit in range(8):
+                if byte & (0x80 >> bit):
+                    present.add(window * 256 + i * 8 + bit)
+    for rdtype in (dns.rdatatype.SOA, dns.rdatatype.NS, dns.rdatatype.DNSKEY,
+                   dns.rdatatype.NSEC, dns.rdatatype.RRSIG):
+        assert rdtype in present

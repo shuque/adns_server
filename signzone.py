@@ -13,7 +13,7 @@ import argparse
 import calendar
 import collections
 import os
-import random  # pylint: disable=unused-import
+import random
 import sys
 import time
 
@@ -22,14 +22,13 @@ import dns.rdata
 import dns.rdataclass
 import dns.rdataset
 import dns.rdatatype
+import dns.rrset
 import dns.dnssec
 import dns.exception
 
-from dnssec_util import (  # pylint: disable=unused-import
+from dnssec_util import (
     zone_from_file, load_private_key, key_basename,
     make_nsec_rrset, AUTH_IN_PARENT_RRTYPES)
-# make_nsec_rrset and AUTH_IN_PARENT_RRTYPES are unused in this stage but are
-# consumed by sign_zone() once it is implemented in Task 4.
 
 
 class SignerError(Exception):
@@ -131,10 +130,145 @@ def write_zone(zone, output_path):
     os.replace(tmp, output_path)
 
 
+def rrsig_rdata(rrset, private_key, signer,      # pylint: disable=too-many-positional-arguments
+                dnskey, inception, expiration):
+    """Uncached RRSIG generation with explicit absolute times -- the offline
+    analog of the server's cached sign_rrset(). Returns RRSIG rdata."""
+    return dns.dnssec.sign(rrset, private_key, signer, dnskey,
+                           inception=inception, expiration=expiration)
+
+
+def classify_signers(keys):
+    """Return (dnskey_signers, rest_signers) from the active (PEM-bearing)
+    keys. Invariant (Signer.md §§3-4): the DNSKEY RRset is signed by every SEP
+    key that has a PEM; everything else by every non-SEP key that has a PEM. A
+    single SEP key with no separate ZSK is a CSK and signs both."""
+    active = [k for k in keys if k.private_key is not None]
+    sep = [k for k in active if k.is_sep]
+    zsk = [k for k in active if not k.is_sep]
+    dnskey_signers = sep or zsk            # SEP signs DNSKEY; fall back to ZSK
+    rest_signers = zsk or sep              # ZSK signs the rest; CSK fallback
+    return dnskey_signers, rest_signers
+
+
+def _jittered_expiration(base_expiration, jitter):
+    """base_expiration +/- a uniform random offset in [-jitter, +jitter]."""
+    if jitter <= 0:
+        return base_expiration
+    return base_expiration + random.randint(-jitter, jitter)
+
+
+def _cut_names(zone):
+    """Owners (other than the apex) that are delegation cuts: they have NS
+    and/or a Delegation Type (DELEG). Returned as a set of dns.name.Name."""
+    cuts = set()
+    for name, node in zone.nodes.items():
+        if name == zone.origin:
+            continue
+        if node.get_rdataset(dns.rdataclass.IN, dns.rdatatype.NS):
+            cuts.add(name)
+            continue
+        for rdtype in AUTH_IN_PARENT_RRTYPES:
+            if rdtype == dns.rdatatype.DS:
+                continue
+            if node.get_rdataset(dns.rdataclass.IN, rdtype):
+                cuts.add(name)
+                break
+    return cuts
+
+
+def is_occluded(name, cut_names):
+    """True if name is strictly below some delegation cut (glue / occluded)."""
+    return any(name != cut and name.is_subdomain(cut) for cut in cut_names)
+
+
+def authoritative_owners(zone, cut_names):
+    """Owners that get an NSEC, in canonical sorted order: every non-ENT,
+    non-occluded owner that owned an RRset in the unsigned zone. ENT nodes are
+    empty (no rdatasets) and excluded; occluded glue below a cut is excluded."""
+    owners = []
+    for name, node in zone.nodes.items():
+        if not node.rdatasets:                 # ENT
+            continue
+        if is_occluded(name, cut_names):        # glue below a cut
+            continue
+        owners.append(name)
+    return sorted(owners)
+
+
+def _rrsets_to_sign(name, node, is_cut):
+    """Yield the authoritative RRsets at a node. At a cut only the
+    authoritative-in-parent types (DS/DELEG) are signed; NS and glue are not.
+    Elsewhere every non-DNSSEC RRset is authoritative."""
+    for rdataset in list(node.rdatasets):
+        rdtype = rdataset.rdtype
+        if rdtype in (dns.rdatatype.RRSIG, dns.rdatatype.NSEC,
+                      dns.rdatatype.NSEC3):
+            continue
+        if is_cut and rdtype not in AUTH_IN_PARENT_RRTYPES:
+            continue
+        rrset = dns.rrset.RRset(name, dns.rdataclass.IN, rdtype)
+        rrset.update(rdataset)
+        yield rrset
+
+
+def _add_rrsig(node, rrset, rrsig):
+    """Attach an RRSIG rdata (covering rrset.rdtype) to node."""
+    rdataset = node.find_rdataset(dns.rdataclass.IN, dns.rdatatype.RRSIG,
+                                  covers=rrset.rdtype, create=True)
+    rdataset.add(rrsig, ttl=rrset.ttl)
+
+
+def _sign_with_keys(node, rrset, signer, signers,          # pylint: disable=too-many-positional-arguments
+                    inception, base_expiration, jitter):
+    """Sign rrset with every key in signers and attach the RRSIGs to node."""
+    for key in signers:
+        rrsig = rrsig_rdata(rrset, key.private_key, signer, key.dnskey_rdata,
+                            inception,
+                            _jittered_expiration(base_expiration, jitter))
+        _add_rrsig(node, rrset, rrsig)
+
+
+def _sign_authoritative_rrsets(zone, cut_names, dnskey_signers, rest_signers,  # pylint: disable=too-many-positional-arguments
+                               inception, base_expiration, jitter):
+    """Sign every authoritative RRset in the zone (skip occluded glue)."""
+    for name, node in zone.nodes.items():
+        if is_occluded(name, cut_names):
+            continue
+        is_cut = name in cut_names
+        for rrset in _rrsets_to_sign(name, node, is_cut):
+            signers = (dnskey_signers if rrset.rdtype == dns.rdatatype.DNSKEY
+                      else rest_signers)
+            _sign_with_keys(node, rrset, zone.origin, signers,
+                            inception, base_expiration, jitter)
+
+
+def _build_nsec_chain(zone, cut_names, rest_signers,     # pylint: disable=too-many-positional-arguments
+                      inception, base_expiration, jitter):
+    """Build and sign the NSEC chain over authoritative owners."""
+    owners = authoritative_owners(zone, cut_names)
+    for i, owner in enumerate(owners):
+        node = zone.get_node(owner)
+        nextname = owners[(i + 1) % len(owners)]
+        present = {rds.rdtype for rds in node.rdatasets
+                   if rds.rdtype != dns.rdatatype.NSEC}
+        present.add(dns.rdatatype.NSEC)
+        present.add(dns.rdatatype.RRSIG)
+        nsec_rrset = make_nsec_rrset(owner, nextname, sorted(present),
+                                     zone.soa_min_ttl)
+        node.rdatasets.append(nsec_rrset.to_rdataset())
+        _sign_with_keys(node, nsec_rrset, zone.origin, rest_signers,
+                        inception, base_expiration, jitter)
+
+
 def sign_zone(zone, keys, inception, base_expiration, jitter):
-    """Add RRSIGs and an NSEC chain to the stripped zone. Implemented in the
-    next task."""
-    raise NotImplementedError
+    """Sign every authoritative RRset and build the NSEC chain in place."""
+    dnskey_signers, rest_signers = classify_signers(keys)
+    cut_names = _cut_names(zone)
+    _sign_authoritative_rrsets(zone, cut_names, dnskey_signers, rest_signers,
+                               inception, base_expiration, jitter)
+    _build_nsec_chain(zone, cut_names, rest_signers,
+                      inception, base_expiration, jitter)
 
 
 def make_arg_parser():
