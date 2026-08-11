@@ -3,10 +3,12 @@
 """
 Offline DELEG-aware DNSSEC zone signer for adns_server.
 
-Stage 1 (this file): NSEC chain, single CSK. Strips any existing DNSSEC
-records and re-signs from scratch with explicit absolute RRSIG times, writing
-<zonefile>.signed atomically. NSEC3, multi-key rollover, and DELEG cut handling
-are later stages. See Signer.md.
+Single CSK. Strips any existing DNSSEC records and re-signs from scratch with
+explicit absolute RRSIG times, writing <zonefile>.signed atomically. The mode
+of authenticated denial is data-driven: an apex NSEC3PARAM record makes the
+signer build an NSEC3 chain (using that record's parameters), otherwise it
+builds an NSEC chain. Multi-key rollover and DELEG cut handling are later
+stages. See Signer.md.
 """
 
 import argparse
@@ -29,7 +31,7 @@ from dns.rdtypes.dnskeybase import SEP
 
 from dnssec_util import (
     zone_from_file, load_private_key, key_basename,
-    make_nsec_rrset, AUTH_IN_PARENT_RRTYPES)
+    make_nsec_rrset, make_nsec3_rrset, nsec3hash, AUTH_IN_PARENT_RRTYPES)
 
 
 class SignerError(Exception):
@@ -315,16 +317,87 @@ def _build_nsec_chain(zone, occluding_parents, rest_signers,     # pylint: disab
                         inception, base_expiration, jitter)
 
 
+def _nsec3param(zone):
+    """
+    Return the apex NSEC3PARAM rdata if present (NSEC3 mode), else None. The
+    record itself is the mode switch (Signer.md 4); no CLI toggle. Enforces the
+    same single-record rule as Zone.init_dnssec().
+    """
+    rdataset = zone.get_rdataset(zone.origin, dns.rdatatype.NSEC3PARAM)
+    if not rdataset:
+        return None
+    if len(rdataset) > 1:
+        raise SignerError("only one NSEC3PARAM record is supported")
+    return rdataset[0]
+
+
+def nsec3_owners(zone, occluding_parents):
+    """
+    Owners that get an NSEC3, in original-name canonical order: every
+    non-occluded owner, INCLUDING empty non-terminals. This is the reverse of
+    the NSEC chain (RFC 5155 7.1: "Each empty non-terminal MUST have a
+    corresponding NSEC3 RR", vs RFC 4035 which excludes ENTs from NSEC).
+    Occluded names below a delegation cut or DNAME are still excluded.
+    """
+    owners = []
+    for name in zone.nodes:
+        if is_occluded(name, occluding_parents):
+            continue
+        owners.append(name)
+    return sorted(owners)
+
+
+def _build_nsec3_chain(zone, params, occluding_parents, rest_signers,  # pylint: disable=too-many-positional-arguments
+                       inception, base_expiration, jitter):
+    """
+    Build and sign the NSEC3 chain in hash-sorted order. Because NSEC3 sorts by
+    hash, this is a separate pass from the name-sorted signing walk: hash every
+    owner (incl. ENTs), sort by hash, then link each hashed owner's next field
+    to the following hash (wrapping to the smallest -- a closed loop).
+    """
+    entries = []
+    for name in nsec3_owners(zone, occluding_parents):
+        node = zone.get_node(name)
+        h_str = nsec3hash(name, params.algorithm, params.salt,
+                          params.iterations)
+        h_bin = nsec3hash(name, params.algorithm, params.salt,
+                          params.iterations, binary_out=True)
+        hashed_owner = dns.name.Name((h_str.encode(),) + zone.origin.labels)
+        # Bitmap = the original name's present types (RRSIG included exactly
+        # when the name has signed data); never the NSEC3 bit (it is not set on
+        # the node itself, RFC 5155 7.1). ENTs own nothing -> empty bitmap.
+        bitmap = sorted(rds.rdtype for rds in node.rdatasets)
+        entries.append((h_bin, hashed_owner, bitmap))
+    entries.sort(key=lambda entry: entry[0])
+    count = len(entries)
+    for i, (_h_bin, hashed_owner, bitmap) in enumerate(entries):
+        next_hash = entries[(i + 1) % count][0]
+        nsec3_rrset = make_nsec3_rrset(params, hashed_owner, next_hash,
+                                       bitmap, zone.soa_min_ttl)
+        node = zone.find_node(hashed_owner, create=True)
+        node.rdatasets.append(nsec3_rrset.to_rdataset())
+        _sign_with_keys(node, nsec3_rrset, zone.origin, rest_signers,
+                        inception, base_expiration, jitter)
+
+
 def sign_zone(zone, keys, inception, base_expiration, jitter):
-    """Sign every authoritative RRset and build the NSEC chain in place."""
+    """
+    Sign every authoritative RRset and build the denial-of-existence chain in
+    place. The chain is NSEC3 if the apex has an NSEC3PARAM record, else NSEC.
+    """
     dnskey_signers, rest_signers = classify_signers(keys)
     cut_names = _cut_names(zone)
     occluding_parents = _occluding_parents(zone, cut_names)
     _sign_authoritative_rrsets(zone, cut_names, occluding_parents,
                                dnskey_signers, rest_signers,
                                inception, base_expiration, jitter)
-    _build_nsec_chain(zone, occluding_parents, rest_signers,
-                      inception, base_expiration, jitter)
+    params = _nsec3param(zone)
+    if params is not None:
+        _build_nsec3_chain(zone, params, occluding_parents, rest_signers,
+                           inception, base_expiration, jitter)
+    else:
+        _build_nsec_chain(zone, occluding_parents, rest_signers,
+                          inception, base_expiration, jitter)
 
 
 def make_arg_parser():

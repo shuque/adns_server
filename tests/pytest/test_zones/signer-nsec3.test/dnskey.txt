@@ -1,0 +1,2 @@
+; flags=257 keytag=24244
+signer-nsec3.test. IN DNSKEY 257 3 13 aK2dawJGysfINWTfpab04Jz5FMSSz+/r xdFM0PIs3MtQLWponjsVOcTt3jF5aNkC nQMsP0sljKKCjOz9eei7uw==

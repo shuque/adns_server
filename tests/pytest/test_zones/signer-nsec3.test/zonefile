@@ -1,0 +1,46 @@
+$TTL 86400
+$ORIGIN signer-nsec3.test.
+@		IN	SOA	ns.signer-nsec3.test. hostmaster.signer-nsec3.test. (
+				1          ; Serial
+				43200      ; Refresh
+				3600       ; Retry
+				3628800    ; Expire
+				3600 )     ; Minimum
+		IN	NS	ns.signer-nsec3.test.
+;;
+;; NSEC3PARAM is the mode switch: its presence makes signzone build an NSEC3
+;; chain using these parameters. RFC 9276: SHA-1, no opt-out, 0 iterations,
+;; empty salt ('-').
+;;
+		IN	NSEC3PARAM 1 0 0 -
+$INCLUDE signer-nsec3.test/dnskey.txt
+;;
+;; Apex nameserver and a couple of ordinary names.
+;;
+ns		IN	A	192.0.2.1
+www		IN	A	192.0.2.10
+www		IN	AAAA	2001:db8::10
+;;
+;; Wildcard and a parallel explicit name.
+;;
+*.wild		IN	A	192.0.2.20
+exact.wild	IN	A	192.0.2.21
+;;
+;; Empty non-terminal: 'ent' and 'deep.ent' own no RRset; host.deep.ent does.
+;; Unlike NSEC, every ENT gets its own NSEC3 (RFC 5155 7.1).
+;;
+host.deep.ent	IN	A	192.0.2.30
+;;
+;; Traditional secure delegation with IN-ZONE glue below the cut.
+;; 'sub' is a cut (NS+DS); ns1.sub is occluded glue: not signed, no NSEC3.
+;;
+sub		IN	NS	ns1.sub.signer-nsec3.test.
+sub		IN	DS	40524 13 2 0000000000000000000000000000000000000000000000000000000000000001
+ns1.sub		IN	A	192.0.2.2
+;;
+;; DNAME (RFC 6672): 'dname' is authoritative (its DNAME RRset is signed and it
+;; gets an NSEC3), but the subtree strictly below is occluded: 'below.dname' is
+;; neither signed nor NSEC3'd.
+;;
+dname		IN	DNAME	target.example.
+below.dname	IN	A	192.0.2.40

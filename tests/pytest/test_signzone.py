@@ -1,4 +1,5 @@
-"""Unit + round-trip tests for signzone.py (Stage 1: NSEC single-CSK)."""
+"""Unit + round-trip tests for signzone.py (NSEC / NSEC3 single-CSK)."""
+import base64
 import os
 import subprocess
 import sys
@@ -312,3 +313,144 @@ def test_discover_keys_bad_pem_raises_signer_error(tmp_path):
     bad_pem.write_text("not a valid PEM key\n")
     with pytest.raises(sz.SignerError):
         sz.discover_keys(zone, str(tmp_path))
+
+
+# --------------------------------------------------------------------------
+# NSEC3 mode (Signer.md 4): an apex NSEC3PARAM record switches the signer to
+# an NSEC3 chain. The signer-nsec3.test fixture mirrors the NSEC one (same
+# DNAME, ENT chain, secure cut + glue, wildcard) plus an NSEC3PARAM record.
+# --------------------------------------------------------------------------
+
+NSEC3_ZONE_NAME = "signer-nsec3.test"
+
+
+def _load_nsec3_fixture():
+    cwd = os.getcwd()
+    os.chdir(ZONE_DIR)
+    try:
+        return dnssec_util.zone_from_file(
+            dns.name.from_text(NSEC3_ZONE_NAME), "signer-nsec3.test/zonefile")
+    finally:
+        os.chdir(cwd)
+
+
+def _sign_nsec3_fixture(jitter=0):
+    """Load, strip, and sign the NSEC3 fixture in memory; return the Zone."""
+    sz = _signzone()
+    zone = _load_nsec3_fixture()
+    keydir = os.path.join(ZONE_DIR, "signer-nsec3.test")
+    keys = sz.discover_keys(zone, keydir)
+    sz.strip_dnssec(zone)
+    now = 1_700_000_000
+    sz.sign_zone(zone, keys, now - 3600, now + 2592000, jitter)
+    return zone, keys
+
+
+def _nsec3_records(zone):
+    """Return {owner_name: nsec3_rdata} for every NSEC3 in the zone."""
+    out = {}
+    for name, node in zone.nodes.items():
+        rds = node.get_rdataset(dns.rdataclass.IN, dns.rdatatype.NSEC3)
+        if rds is not None:
+            out[name] = rds[0]
+    return out
+
+
+def _hashed(zone, name):
+    """Hashed owner name for `name` under the fixture's NSEC3PARAM."""
+    params = zone.get_rdataset(zone.origin, dns.rdatatype.NSEC3PARAM)[0]
+    h = dnssec_util.nsec3hash(name, params.algorithm, params.salt,
+                              params.iterations)
+    return dns.name.Name((h.encode(),) + zone.origin.labels)
+
+
+def test_nsec3param_switches_mode():
+    # The zone gets an NSEC3 chain (not NSEC) purely because it has NSEC3PARAM.
+    zone, _keys = _sign_nsec3_fixture()
+    n3 = _nsec3_records(zone)
+    assert n3, "expected an NSEC3 chain"
+    # No plain NSEC anywhere.
+    for _name, node in zone.nodes.items():
+        assert node.get_rdataset(dns.rdataclass.IN, dns.rdatatype.NSEC) is None
+
+
+def test_nsec3_signed_rrsets_validate():
+    import dns.rrset
+    zone, _keys = _sign_nsec3_fixture()
+    origin = zone.origin
+    dnskey_rrset = _dnskey_rrset_of(zone)
+    checked = 0
+    for name, node in zone.nodes.items():
+        for rrsig_ds in [r for r in node.rdatasets
+                         if r.rdtype == dns.rdatatype.RRSIG]:
+            covered = rrsig_ds.covers
+            rrset = dns.rrset.RRset(name, dns.rdataclass.IN, covered)
+            rrset.update(node.get_rdataset(dns.rdataclass.IN, covered))
+            rrsig = dns.rrset.RRset(name, dns.rdataclass.IN,
+                                    dns.rdatatype.RRSIG, covered)
+            rrsig.update(rrsig_ds)
+            dns.dnssec.validate(rrset, rrsig, {origin: dnskey_rrset},
+                                now=1_700_000_000)
+            checked += 1
+    assert checked >= 6      # apex SOA/NS/DNSKEY/NSEC3PARAM + A's + DS + NSEC3s
+
+
+def test_nsec3_chain_includes_ents():
+    # The reverse of NSEC: every empty non-terminal gets its own NSEC3, with an
+    # empty type bitmap (RFC 5155 7.1). 'ent', 'deep.ent', and 'wild' are ENTs.
+    zone, _keys = _sign_nsec3_fixture()
+    n3 = _nsec3_records(zone)
+    for ent_label in ("ent", "deep.ent", "wild"):
+        ent = dns.name.from_text(ent_label + "." + NSEC3_ZONE_NAME + ".")
+        owner = _hashed(zone, ent)
+        assert owner in n3, f"no NSEC3 for ENT {ent_label}"
+        assert not _nsec_types(n3[owner]), "ENT NSEC3 bitmap must be empty"
+
+
+def test_nsec3_excludes_occluded_names():
+    # Occluded glue below the cut, and the subtree below a DNAME, get no NSEC3.
+    zone, _keys = _sign_nsec3_fixture()
+    n3 = _nsec3_records(zone)
+    for occluded in ("ns1.sub", "below.dname"):
+        name = dns.name.from_text(occluded + "." + NSEC3_ZONE_NAME + ".")
+        assert _hashed(zone, name) not in n3, \
+            f"{occluded} must not have an NSEC3"
+
+
+def test_nsec3_dname_owner_is_hashed_and_signed():
+    # The DNAME owner is authoritative: its DNAME RRset is signed and it gets an
+    # NSEC3 whose bitmap lists DNAME (mirrors the NSEC-mode DNAME test).
+    zone, _keys = _sign_nsec3_fixture()
+    dname = dns.name.from_text("dname." + NSEC3_ZONE_NAME + ".")
+    dnode = zone.get_node(dname)
+    dcovers = {r.covers for r in dnode.rdatasets
+               if r.rdtype == dns.rdatatype.RRSIG}
+    assert dns.rdatatype.DNAME in dcovers
+    owner = _hashed(zone, dname)
+    n3 = _nsec3_records(zone)
+    assert owner in n3
+    assert dns.rdatatype.DNAME in _nsec_types(n3[owner])
+
+
+# base32hex (extended-hex, RFC 4648) label -> standard base32, for decoding an
+# NSEC3 owner label back to the 20-octet hash it encodes.
+_HEX_TO_B32 = bytes.maketrans(b'0123456789ABCDEFGHIJKLMNOPQRSTUV',
+                              b'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567')
+
+
+def _label_to_hash(label):
+    """Decode a base32hex NSEC3 owner label into its raw 20-octet hash."""
+    return base64.b32decode(label.translate(_HEX_TO_B32))
+
+
+def test_nsec3_chain_is_closed_and_hash_sorted():
+    # NSEC3 sorts by hash: owners in base32hex order, each next field = the
+    # following owner's hash, last wrapping to the first (closed loop).
+    zone, _keys = _sign_nsec3_fixture()
+    n3 = _nsec3_records(zone)
+    owners = sorted(n3, key=lambda n: n.labels[0])   # base32hex sorts as hash
+    for i, owner in enumerate(owners):
+        follow_label = owners[(i + 1) % len(owners)].labels[0]
+        assert n3[owner].next == _label_to_hash(follow_label), (owner, i)
+    # The apex is part of the chain.
+    assert _hashed(zone, zone.origin) in n3
