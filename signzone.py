@@ -25,6 +25,7 @@ import dns.rdatatype
 import dns.rrset
 import dns.dnssec
 import dns.exception
+from dns.rdtypes.dnskeybase import SEP
 
 from dnssec_util import (
     zone_from_file, load_private_key, key_basename,
@@ -79,8 +80,6 @@ def parse_time(spec, now):
 KeyInfo = collections.namedtuple(
     "KeyInfo", ["dnskey_rdata", "keytag", "algorithm", "is_sep", "private_key"])
 
-SEP_BIT = 0x0001
-
 
 def discover_keys(zone, keydir):
     """Return a KeyInfo per apex DNSKEY. For each, compute the keytag and look
@@ -104,7 +103,7 @@ def discover_keys(zone, keydir):
             except (ValueError, OSError) as exc:
                 raise SignerError(f"cannot load private key {pem!r}: {exc}") from exc
         keys.append(KeyInfo(rdata, keytag, rdata.algorithm,
-                            bool(rdata.flags & SEP_BIT), private_key))
+                            bool(rdata.flags & SEP), private_key))
     if not any(k.private_key is not None for k in keys):
         raise SignerError(
             f"no private key found in {keydir!r} for any DNSKEY of "
