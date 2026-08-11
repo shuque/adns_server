@@ -216,6 +216,38 @@ def test_cut_authority_rule():
     assert dns.rdatatype.NSEC not in gcovers
 
 
+def test_dname_owner_signed_but_subtree_occluded():
+    # RFC 6672: the DNAME owner is authoritative -- its DNAME RRset is signed
+    # and it gets an NSEC (bitmap includes DNAME). Names strictly BELOW the
+    # DNAME owner are occluded: neither signed nor given an NSEC.
+    zone, _keys = _sign_fixture()
+    dname = dns.name.from_text("dname." + NSEC_ZONE_NAME + ".")
+    dnode = zone.get_node(dname)
+    dcovers = {r.covers for r in dnode.rdatasets
+               if r.rdtype == dns.rdatatype.RRSIG}
+    assert dns.rdatatype.DNAME in dcovers        # DNAME RRset is signed
+    assert dns.rdatatype.NSEC in dcovers         # NSEC at the DNAME owner
+    nsec = dnode.get_rdataset(dns.rdataclass.IN, dns.rdatatype.NSEC)[0]
+    assert dns.rdatatype.DNAME in _nsec_types(nsec)
+    # The name below the DNAME is occluded: no RRSIG, no NSEC.
+    below = dns.name.from_text("below.dname." + NSEC_ZONE_NAME + ".")
+    bnode = zone.get_node(below)
+    btypes = {r.rdtype for r in bnode.rdatasets}
+    assert dns.rdatatype.RRSIG not in btypes
+    assert dns.rdatatype.NSEC not in btypes
+
+
+def _nsec_types(nsec):
+    """Set of RR types present in an NSEC rdata's type bitmap."""
+    present = set()
+    for window, bitmap in nsec.windows:
+        for i, byte in enumerate(bitmap):
+            for bit in range(8):
+                if byte & (0x80 >> bit):
+                    present.add(window * 256 + i * 8 + bit)
+    return present
+
+
 def test_nsec_chain_closed_and_excludes_ents():
     zone, _keys = _sign_fixture()
     origin = zone.origin

@@ -30,3 +30,10 @@ host.deep.ent	IN	A	192.0.2.30
 sub		IN	NS	ns1.sub.signer-nsec.test.
 sub		IN	DS	40524 13 2 0000000000000000000000000000000000000000000000000000000000000001
 ns1.sub		IN	A	192.0.2.2
+;;
+;; DNAME (RFC 6672): 'dname' is authoritative (its DNAME RRset is signed and it
+;; gets an NSEC), but the subtree strictly below is occluded: 'below.dname' is
+;; neither signed nor NSEC'd.
+;;
+dname		IN	DNAME	target.example.
+below.dname	IN	A	192.0.2.40

@@ -206,22 +206,42 @@ def _cut_names(zone):
     return cuts
 
 
-def is_occluded(name, cut_names):
-    """True if name is strictly below some delegation cut (glue / occluded)."""
-    return any(name != cut and name.is_subdomain(cut) for cut in cut_names)
+def _occluding_parents(zone, cut_names):
+    """
+    Names below which every descendant is occluded -- unsigned, no NSEC:
+    delegation cuts (NS/DELEG) plus DNAME owners. Per RFC 6672 a DNAME occludes
+    the entire subtree strictly below its owner, exactly as glue is occluded
+    below a delegation cut. The DNAME owner node itself is ordinary
+    authoritative data (its DNAME RRset is signed and it gets an NSEC), so it
+    is NOT added here; only names strictly below it are occluded.
+    """
+    occluding = set(cut_names)
+    for name, node in zone.nodes.items():
+        if node.get_rdataset(dns.rdataclass.IN, dns.rdatatype.DNAME):
+            occluding.add(name)
+    return occluding
 
 
-def authoritative_owners(zone, cut_names):
+def is_occluded(name, occluding_parents):
+    """
+    True if name is strictly below a delegation cut or a DNAME owner
+    (occluded glue / occluded subtree).
+    """
+    return any(name != p and name.is_subdomain(p) for p in occluding_parents)
+
+
+def authoritative_owners(zone, occluding_parents):
     """
     Owners that get an NSEC, in canonical sorted order: every non-ENT,
     non-occluded owner that owned an RRset in the unsigned zone. ENT nodes are
-    empty (no rdatasets) and excluded; occluded glue below a cut is excluded.
+    empty (no rdatasets) and excluded; occluded names below a cut or DNAME are
+    excluded.
     """
     owners = []
     for name, node in zone.nodes.items():
         if not node.rdatasets:                 # ENT
             continue
-        if is_occluded(name, cut_names):        # glue below a cut
+        if is_occluded(name, occluding_parents):
             continue
         owners.append(name)
     return sorted(owners)
@@ -262,11 +282,12 @@ def _sign_with_keys(node, rrset, signer, signers,          # pylint: disable=too
         _add_rrsig(node, rrset, rrsig)
 
 
-def _sign_authoritative_rrsets(zone, cut_names, dnskey_signers, rest_signers,  # pylint: disable=too-many-positional-arguments
+def _sign_authoritative_rrsets(zone, cut_names, occluding_parents,  # pylint: disable=too-many-positional-arguments
+                               dnskey_signers, rest_signers,
                                inception, base_expiration, jitter):
-    """Sign every authoritative RRset in the zone (skip occluded glue)."""
+    """Sign every authoritative RRset in the zone (skip occluded names)."""
     for name, node in zone.nodes.items():
-        if is_occluded(name, cut_names):
+        if is_occluded(name, occluding_parents):
             continue
         is_cut = name in cut_names
         for rrset in _rrsets_to_sign(name, node, is_cut):
@@ -276,10 +297,10 @@ def _sign_authoritative_rrsets(zone, cut_names, dnskey_signers, rest_signers,  #
                             inception, base_expiration, jitter)
 
 
-def _build_nsec_chain(zone, cut_names, rest_signers,     # pylint: disable=too-many-positional-arguments
+def _build_nsec_chain(zone, occluding_parents, rest_signers,     # pylint: disable=too-many-positional-arguments
                       inception, base_expiration, jitter):
     """Build and sign the NSEC chain over authoritative owners."""
-    owners = authoritative_owners(zone, cut_names)
+    owners = authoritative_owners(zone, occluding_parents)
     for i, owner in enumerate(owners):
         node = zone.get_node(owner)
         nextname = owners[(i + 1) % len(owners)]
@@ -298,9 +319,11 @@ def sign_zone(zone, keys, inception, base_expiration, jitter):
     """Sign every authoritative RRset and build the NSEC chain in place."""
     dnskey_signers, rest_signers = classify_signers(keys)
     cut_names = _cut_names(zone)
-    _sign_authoritative_rrsets(zone, cut_names, dnskey_signers, rest_signers,
+    occluding_parents = _occluding_parents(zone, cut_names)
+    _sign_authoritative_rrsets(zone, cut_names, occluding_parents,
+                               dnskey_signers, rest_signers,
                                inception, base_expiration, jitter)
-    _build_nsec_chain(zone, cut_names, rest_signers,
+    _build_nsec_chain(zone, occluding_parents, rest_signers,
                       inception, base_expiration, jitter)
 
 
