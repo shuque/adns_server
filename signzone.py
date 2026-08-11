@@ -41,8 +41,10 @@ _UNIT_SECONDS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400,
 
 
 def parse_duration(spec):
-    """Parse a duration into seconds. Bare integer = seconds; a trailing
-    s/m/h/d/w/y unit multiplies accordingly. Used directly for -j (jitter)."""
+    """
+    Parse a duration into seconds. Bare integer = seconds; a trailing
+    s/m/h/d/w/y unit multiplies accordingly. Used directly for -j (jitter).
+    """
     spec = spec.strip()
     if not spec:
         raise SignerError("empty duration")
@@ -60,7 +62,8 @@ def parse_duration(spec):
 
 
 def parse_time(spec, now):
-    """Resolve an -e/-i time spec to an absolute epoch (int seconds, UTC).
+    """
+    Resolve an -e/-i time spec to an absolute epoch (int seconds, UTC).
 
     - 14-digit YYYYMMDDHHMMSS  -> that absolute UTC instant.
     - leading '+' or unsigned  -> now + parse_duration(rest).
@@ -82,10 +85,12 @@ KeyInfo = collections.namedtuple(
 
 
 def discover_keys(zone, keydir):
-    """Return a KeyInfo per apex DNSKEY. For each, compute the keytag and look
+    """
+    Return a KeyInfo per apex DNSKEY. For each, compute the keytag and look
     for <keydir>/<zone>+<alg>+<keytag>.pem; load it if present (active), else
     the key is publish-only (private_key=None). Errors if the zone has no
-    DNSKEY, or if no DNSKEY has a matching PEM (nothing to sign with)."""
+    DNSKEY, or if no DNSKEY has a matching PEM (nothing to sign with).
+    """
     dnskey_rdataset = zone.get_rdataset(zone.origin, dns.rdatatype.DNSKEY)
     if not dnskey_rdataset:
         raise SignerError("zone has no apex DNSKEY RRset")
@@ -120,9 +125,11 @@ def strip_dnssec(zone):
 
 
 def write_zone(zone, output_path):
-    """Serialize the (signed) zone. Absolute names (relativize=False). Writes
+    """
+    Serialize the (signed) zone. Absolute names (relativize=False). Writes
     to a temp file in the destination dir then atomically renames, so a failure
-    leaves no partial .signed. output_path '-' writes to stdout."""
+    leaves no partial .signed. output_path '-' writes to stdout.
+    """
     text = zone.to_text(relativize=False)
     if output_path == '-':
         sys.stdout.write(text)
@@ -136,17 +143,21 @@ def write_zone(zone, output_path):
 
 def rrsig_rdata(rrset, private_key, signer,      # pylint: disable=too-many-positional-arguments
                 dnskey, inception, expiration):
-    """Uncached RRSIG generation with explicit absolute times -- the offline
-    analog of the server's cached sign_rrset(). Returns RRSIG rdata."""
+    """
+    Uncached RRSIG generation with explicit absolute times -- the offline
+    analog of the server's cached sign_rrset(). Returns RRSIG rdata.
+    """
     return dns.dnssec.sign(rrset, private_key, signer, dnskey,
                            inception=inception, expiration=expiration)
 
 
 def classify_signers(keys):
-    """Return (dnskey_signers, rest_signers) from the active (PEM-bearing)
+    """
+    Return (dnskey_signers, rest_signers) from the active (PEM-bearing)
     keys. Invariant (Signer.md §§3-4): the DNSKEY RRset is signed by every SEP
     key that has a PEM; everything else by every non-SEP key that has a PEM. A
-    single SEP key with no separate ZSK is a CSK and signs both."""
+    single SEP key with no separate ZSK is a CSK and signs both.
+    """
     active = [k for k in keys if k.private_key is not None]
     sep = [k for k in active if k.is_sep]
     zsk = [k for k in active if not k.is_sep]
@@ -163,8 +174,10 @@ def _jittered_expiration(base_expiration, jitter):
 
 
 def _cut_names(zone):
-    """Owners (other than the apex) that are delegation cuts: they have NS
-    and/or a Delegation Type (DELEG). Returned as a set of dns.name.Name."""
+    """
+    Owners (other than the apex) that are delegation cuts: they have NS
+    and/or a Delegation Type (DELEG). Returned as a set of dns.name.Name.
+    """
     cuts = set()
     for name, node in zone.nodes.items():
         if name == zone.origin:
@@ -187,9 +200,11 @@ def is_occluded(name, cut_names):
 
 
 def authoritative_owners(zone, cut_names):
-    """Owners that get an NSEC, in canonical sorted order: every non-ENT,
+    """
+    Owners that get an NSEC, in canonical sorted order: every non-ENT,
     non-occluded owner that owned an RRset in the unsigned zone. ENT nodes are
-    empty (no rdatasets) and excluded; occluded glue below a cut is excluded."""
+    empty (no rdatasets) and excluded; occluded glue below a cut is excluded.
+    """
     owners = []
     for name, node in zone.nodes.items():
         if not node.rdatasets:                 # ENT
@@ -201,9 +216,11 @@ def authoritative_owners(zone, cut_names):
 
 
 def _rrsets_to_sign(name, node, is_cut):
-    """Yield the authoritative RRsets at a node. At a cut only the
+    """
+    Yield the authoritative RRsets at a node. At a cut only the
     authoritative-in-parent types (DS/DELEG) are signed; NS and glue are not.
-    Elsewhere every non-DNSSEC RRset is authoritative."""
+    Elsewhere every non-DNSSEC RRset is authoritative.
+    """
     for rdataset in list(node.rdatasets):
         rdtype = rdataset.rdtype
         if rdtype in (dns.rdatatype.RRSIG, dns.rdatatype.NSEC,
@@ -300,8 +317,10 @@ def make_arg_parser():
 
 
 def bump_serial(zone):
-    """Increment the apex SOA serial (RFC 1982 wrap not handled; +1).
-    dnspython Rdata is immutable, so replace the rdata rather than mutating."""
+    """
+    Increment the apex SOA serial (RFC 1982 wrap not handled; +1).
+    dnspython Rdata is immutable, so replace the rdata rather than mutating.
+    """
     soa_rdataset = zone.get_rdataset(zone.origin, dns.rdatatype.SOA)
     old = soa_rdataset[0]
     new = old.replace(serial=(old.serial + 1) & 0xFFFFFFFF)
