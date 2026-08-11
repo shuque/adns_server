@@ -1,0 +1,32 @@
+$TTL 86400
+$ORIGIN signer-nsec.test.
+@		IN	SOA	ns.signer-nsec.test. hostmaster.signer-nsec.test. (
+				1          ; Serial
+				43200      ; Refresh
+				3600       ; Retry
+				3628800    ; Expire
+				3600 )     ; Minimum
+		IN	NS	ns.signer-nsec.test.
+$INCLUDE signer-nsec.test/dnskey.txt
+;;
+;; Apex nameserver and a couple of ordinary names.
+;;
+ns		IN	A	192.0.2.1
+www		IN	A	192.0.2.10
+www		IN	AAAA	2001:db8::10
+;;
+;; Wildcard and a parallel explicit name.
+;;
+*.wild		IN	A	192.0.2.20
+exact.wild	IN	A	192.0.2.21
+;;
+;; Empty non-terminal: 'ent' and 'deep.ent' own no RRset; host.deep.ent does.
+;;
+host.deep.ent	IN	A	192.0.2.30
+;;
+;; Traditional secure delegation with IN-ZONE glue below the cut.
+;; 'sub' is a cut (NS+DS); ns1.sub is occluded glue: not signed, no NSEC.
+;;
+sub		IN	NS	ns1.sub.signer-nsec.test.
+sub		IN	DS	40524 13 2 0000000000000000000000000000000000000000000000000000000000000001
+ns1.sub		IN	A	192.0.2.2

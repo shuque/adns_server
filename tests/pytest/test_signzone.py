@@ -50,3 +50,38 @@ def test_genkey_keydir_writes_triple(tmp_path):
                                 dnskey_text.split("DNSKEY", 1)[1].strip())
     import dns.dnssec
     assert dns.dnssec.key_id(rdata) == tag_in_name
+
+
+import dns.name          # noqa: E402
+import dns.rdatatype     # noqa: E402
+
+ZONE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_zones")
+NSEC_ZONE_NAME = "signer-nsec.test"
+NSEC_ZONE_FILE = os.path.join(ZONE_DIR, "signer-nsec.test", "zonefile")
+
+
+def _load_fixture():
+    # zone_from_file resolves $INCLUDE relative to cwd; run from ZONE_DIR.
+    cwd = os.getcwd()
+    os.chdir(ZONE_DIR)
+    try:
+        return dnssec_util.zone_from_file(
+            dns.name.from_text(NSEC_ZONE_NAME), "signer-nsec.test/zonefile")
+    finally:
+        os.chdir(cwd)
+
+
+def test_fixture_shape():
+    zone = _load_fixture()
+    origin = dns.name.from_text(NSEC_ZONE_NAME)
+    assert zone.get_rdataset(origin, dns.rdatatype.SOA)
+    assert zone.get_rdataset(origin, dns.rdatatype.DNSKEY)
+    # ENT nodes present but empty (added by add_ent_nodes()).
+    ent = dns.name.from_text("deep.ent." + NSEC_ZONE_NAME + ".")
+    assert ent in zone.nodes and not zone.get_node(ent).rdatasets
+    # Delegation cut with in-zone glue.
+    sub = dns.name.from_text("sub." + NSEC_ZONE_NAME + ".")
+    assert zone.get_rdataset(sub, dns.rdatatype.NS)
+    assert zone.get_rdataset(sub, dns.rdatatype.DS)
+    glue = dns.name.from_text("ns1.sub." + NSEC_ZONE_NAME + ".")
+    assert zone.get_rdataset(glue, dns.rdatatype.A)
