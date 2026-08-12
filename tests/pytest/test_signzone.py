@@ -55,6 +55,37 @@ def test_adnskeygen_keydir_writes_triple(tmp_path):
     assert dns.dnssec.key_id(rdata) == tag_in_name
 
 
+def test_adnskeygen_prepublish_writes_prepublish_pem(tmp_path):
+    keydir = tmp_path / "keys"
+    result = subprocess.run(
+        [sys.executable, GENKEY, "prepub.test", "-a", "13", "-f", "256",
+         "--keydir", str(keydir), "--prepublish"],
+        capture_output=True, text=True, check=True)
+    # The private key is written with the .prepublish.pem suffix, so
+    # discover_keys' exact <zone>+<alg>+<keytag>.pem match ignores it: the
+    # DNSKEY is published but not used to sign until the operator renames it.
+    prepub = list(keydir.glob("prepub.test+013+*.prepublish.pem"))
+    assert len(prepub) == 1, result.stdout
+    plain = [p for p in keydir.glob("prepub.test+013+*.pem")
+             if not p.name.endswith(".prepublish.pem")]
+    assert not plain            # no active .pem was written
+    base = prepub[0].name[:-len(".prepublish.pem")]
+    # The .dnskey and .ds companions are written unchanged.
+    assert (keydir / (base + ".dnskey")).exists()
+    assert (keydir / (base + ".ds")).exists()
+    # Private key file is owner-only (0600).
+    assert (prepub[0].stat().st_mode & 0o777) == 0o600
+
+
+def test_adnskeygen_prepublish_requires_keydir():
+    # --prepublish without -K/--keydir has nowhere to write the .prepublish.pem.
+    result = subprocess.run(
+        [sys.executable, GENKEY, "prepub.test", "--prepublish"],
+        capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "requires -K" in result.stderr
+
+
 import dns.name          # noqa: E402
 import dns.rdatatype     # noqa: E402
 
@@ -677,6 +708,59 @@ def test_2key_dnskey_signed_by_ksk_rest_by_zsk():
     assert _keytags_of_covering_rrsigs(apex, dns.rdatatype.SOA) == {zsk_tag}
     www = zone.get_node(dns.name.from_text("www." + TWOKEY_ZONE_NAME + "."))
     assert _keytags_of_covering_rrsigs(www, dns.rdatatype.A) == {zsk_tag}
+
+
+def _sign_2key_one_pem(keydir, jitter=0):
+    """
+    Load the 2-key fixture but discover keys from `keydir`, which the caller has
+    seeded with only ONE of the two PEMs. The PEM-less DNSKEY is discovered as
+    publish-only (private_key=None). Returns (zone, keys).
+    """
+    sz = _signzone()
+    cwd = os.getcwd()
+    os.chdir(ZONE_DIR)
+    try:
+        zone = dnssec_util.zone_from_file(
+            dns.name.from_text(TWOKEY_ZONE_NAME), "signer-2key.test/zonefile")
+    finally:
+        os.chdir(cwd)
+    keys = sz.discover_keys(zone, str(keydir))
+    sz.strip_dnssec(zone)
+    now = 1_700_000_000
+    sz.sign_zone(zone, keys, now - 3600, now + 2592000, jitter)
+    return zone, keys
+
+
+def test_2key_prepublished_key_is_published_not_signing(tmp_path):
+    # Pre-publish rollover: a DNSKEY with no matching PEM must still be published
+    # in the apex DNSKEY RRset but must NOT sign anything (its keytag appears in
+    # no RRSIG). Seed a keydir with only one of the fixture's two PEMs.
+    import shutil
+    src = os.path.join(ZONE_DIR, "signer-2key.test")
+    all_pems = [f for f in os.listdir(src) if f.endswith(".pem")]
+    assert len(all_pems) == 2
+    keydir = tmp_path / "keys"
+    keydir.mkdir()
+    shutil.copy(os.path.join(src, all_pems[0]), str(keydir))  # only one active
+
+    zone, keys = _sign_2key_one_pem(keydir)
+    assert len(keys) == 2
+    publish_only = [k for k in keys if k.private_key is None]
+    active = [k for k in keys if k.private_key is not None]
+    assert len(publish_only) == 1 and len(active) == 1
+    pub_tag = publish_only[0].keytag
+
+    # Both keys are still published in the apex DNSKEY RRset.
+    dnskey_rds = zone.get_rdataset(zone.origin, dns.rdatatype.DNSKEY)
+    published_tags = {dns.dnssec.key_id(r) for r in dnskey_rds}
+    assert published_tags == {k.keytag for k in keys}
+    assert pub_tag in published_tags
+
+    # The publish-only key signs nothing, anywhere in the zone.
+    for _name, node in zone.nodes.items():
+        for rds in node.rdatasets:
+            if rds.rdtype == dns.rdatatype.RRSIG:
+                assert pub_tag not in {r.key_tag for r in rds}
 
 
 def test_2key_signed_rrsets_validate():

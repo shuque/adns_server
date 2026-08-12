@@ -338,8 +338,12 @@ stage is independently testable and committable.
 - **Stage 1 — NSEC signer, single CSK.** CLI, key discovery, strip-and-re-sign,
   authoritative-RRset signing, NSEC chain, `.signed` output. The MVP.
 - **Stage 2 — NSEC3 signer.** NSEC3PARAM-driven mode; hash-sorted chain.
-- **Stage 3 — Multi-key / rollover.** KSK+ZSK split, double-KSK, ZSK
-  pre-publish — mostly emergent from Stage 1 key classification.
+- **Stage 3 — Multi-key / rollover (done, 2026-08-12).** KSK+ZSK split,
+  double-KSK, ZSK pre-publish — emergent from Stage 1 key classification.
+  `adnskeygen.py --prepublish` writes the `.prepublish.pem`-suffixed private key
+  (§2); `test_signzone.py` covers it plus a publish-only round-trip
+  (`test_2key_prepublished_key_is_published_not_signing`: a PEM-less DNSKEY is
+  published in the apex RRset but signs nothing).
 - **Stage 4 — DELEG (done, 2026-08-11).** Cut predicate includes DELEG; bitmap +
   RRSIG at cuts verified; always-on (no flag) and wildcard-DELEG fail-fast.
 

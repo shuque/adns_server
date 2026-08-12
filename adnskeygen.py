@@ -40,6 +40,11 @@ def process_arguments():
                         help="Value of DNSKEY flags field (default: %(default)d)")
     parser.add_argument("-K", "--keydir", metavar='DIR', default=None,
                         help="write keytag-named .pem/.dnskey/.ds triple here")
+    parser.add_argument("--prepublish", action="store_true",
+                        help="write the private key as .prepublish.pem so the "
+                             "DNSKEY can be pre-published while signzone.py "
+                             "ignores it until it is renamed to .pem (requires "
+                             "-K)")
     return parser.parse_args()
 
 
@@ -77,11 +82,20 @@ def build_dnskey_rrset(zone, dnskey_rdata):
 
 
 def write_key_triple(keydir, zone, algorithm, keytag, private_key,
-                     dnskey_rrset, ds_rr):
-    """Write <basename>.pem/.dnskey/.ds into keydir. zone is a dns.name.Name."""
+                     dnskey_rrset, ds_rr, prepublish=False):
+    """
+    Write <basename>.pem/.dnskey/.ds into keydir. zone is a dns.name.Name.
+
+    When prepublish is true the private key is written as
+    <basename>.prepublish.pem instead of <basename>.pem, so signzone.py's
+    exact-match key discovery ignores it (the DNSKEY is published but not used
+    to sign) until an operator activates it by renaming to <basename>.pem. The
+    .dnskey and .ds companions are written unchanged.
+    """
     os.makedirs(keydir, exist_ok=True)
     basename = key_basename(zone.to_text().rstrip('.'), algorithm, keytag)
-    pem_path = os.path.join(keydir, basename + ".pem")
+    pem_suffix = ".prepublish.pem" if prepublish else ".pem"
+    pem_path = os.path.join(keydir, basename + pem_suffix)
     with open(pem_path, "w", encoding="utf-8") as f:
         f.write(pem_data_for_private_key(private_key))
     os.chmod(pem_path, 0o600)
@@ -97,6 +111,8 @@ def write_key_triple(keydir, zone, algorithm, keytag, private_key,
 if __name__ == '__main__':
 
     CONFIG = process_arguments()
+    if CONFIG.prepublish and not CONFIG.keydir:
+        raise SystemExit("adnskeygen.py: --prepublish requires -K/--keydir")
     ZONE = dns.name.from_text(CONFIG.zone)
 
     PRIVATE_KEY, PUBLIC_KEY = generate_key(CONFIG.algorithm)
@@ -124,6 +140,8 @@ if __name__ == '__main__':
 
     if CONFIG.keydir:
         BASENAME = write_key_triple(CONFIG.keydir, ZONE, CONFIG.algorithm,
-                                    keytag, PRIVATE_KEY, DNSKEY_RRSET, ds)
+                                    keytag, PRIVATE_KEY, DNSKEY_RRSET, ds,
+                                    prepublish=CONFIG.prepublish)
+        PEM_SUFFIX = "prepublish.pem" if CONFIG.prepublish else "pem"
         print('')
-        print(f"### Wrote key files: {BASENAME}.{{pem,dnskey,ds}}")
+        print(f"### Wrote key files: {BASENAME}.{{{PEM_SUFFIX},dnskey,ds}}")
