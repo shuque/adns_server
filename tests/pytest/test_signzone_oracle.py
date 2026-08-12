@@ -1,5 +1,6 @@
 """Independent-oracle checks for signzone.py: BIND dnssec-verify and byte-for-
 byte determinism. Skipped gracefully where BIND is unavailable."""
+import inspect
 import os
 import shutil
 import subprocess
@@ -12,6 +13,25 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 pytestmark = pytest.mark.signer
+
+
+def _deterministic_ecdsa_supported():
+    """
+    Byte-identical signing needs deterministic ECDSA (RFC 6979): cryptography
+    >= 43.0.0 implements it, and dnspython (>= 2.6.0) must request it via the
+    'deterministic' kwarg to dns.dnssec.sign. Without both, ECDSA picks a random
+    k per signature and two signing runs of the same zone differ, so the
+    determinism assertion cannot hold. The fixtures use ECDSAP256SHA256 (alg 13).
+    """
+    import cryptography  # pylint: disable=import-outside-toplevel
+    import dns.dnssec    # pylint: disable=import-outside-toplevel
+    ver = tuple(int(x) for x in cryptography.__version__.split(".")[:2])
+    if ver < (43, 0):
+        return False
+    return "deterministic" in inspect.signature(dns.dnssec.sign).parameters
+
+
+DETERMINISTIC_ECDSA = _deterministic_ecdsa_supported()
 
 SIGNZONE = os.path.join(REPO_ROOT, "signzone.py")
 ZONE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_zones")
@@ -64,6 +84,9 @@ def test_dnssec_verify_accepts_signed_zone(tmp_path, zone_name, subdir,
     assert res.returncode == 0, res.stdout + res.stderr
 
 
+@pytest.mark.skipif(not DETERMINISTIC_ECDSA,
+                    reason="deterministic ECDSA unavailable (needs cryptography "
+                           ">= 43.0.0 and dnspython >= 2.6.0)")
 @pytest.mark.parametrize("zone_name,subdir,single_csk", FIXTURES)
 def test_determinism_byte_identical(tmp_path, zone_name, subdir,
                                     single_csk):  # pylint: disable=unused-argument

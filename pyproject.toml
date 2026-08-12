@@ -12,18 +12,24 @@ authors = [
 ]
 description = "Authoritative DNS server written in Python"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "cryptography>=3.0",
-    "dnspython>=2.5.0",
+    # cryptography >= 43.0.0: deterministic ECDSA (RFC 6979), which the offline
+    # signer relies on for reproducible signatures.
+    "cryptography>=43.0.0",
+    # dnspython >= 2.7.0: current wire/DNSSEC surface used by server and signer;
+    # 2.6.0+ is what added the 'deterministic' kwarg to dns.dnssec.sign.
+    "dnspython>=2.7.0",
     "sortedcontainers",
     "pyyaml",
     "siphash",
-    "cachetools",
+    # cachetools >= 5.4.0: cachetools.cached() gained the info= keyword; the
+    # online-signature cache passes info=True and fails on older versions.
+    "cachetools>=5.4.0",
 ]
 
 [project.optional-dependencies]
