@@ -17,6 +17,7 @@ import dns.rdatatype
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from dns.rdtypes.dnskeybase import SEP
 
 from dnssec_util import key_basename
 
@@ -84,7 +85,12 @@ def build_dnskey_rrset(zone, dnskey_rdata):
 def write_key_triple(keydir, zone, algorithm, keytag, private_key,
                      dnskey_rrset, ds_rr, prepublish=False):
     """
-    Write <basename>.pem/.dnskey/.ds into keydir. zone is a dns.name.Name.
+    Write <basename>.pem/.dnskey into keydir, plus <basename>.ds when ds_rr is
+    not None. zone is a dns.name.Name.
+
+    The .ds file is written only for SEP keys (KSK/CSK); a ZSK is passed
+    ds_rr=None and gets no DS file, since it is not a secure entry point in
+    common operator practice.
 
     When prepublish is true the private key is written as
     <basename>.prepublish.pem instead of <basename>.pem, so signzone.py's
@@ -102,9 +108,10 @@ def write_key_triple(keydir, zone, algorithm, keytag, private_key,
     with open(os.path.join(keydir, basename + ".dnskey"), "w",
               encoding="utf-8") as f:
         f.write(dnskey_rrset.to_text() + "\n")
-    with open(os.path.join(keydir, basename + ".ds"), "w",
-              encoding="utf-8") as f:
-        f.write(f"{zone.to_text()} IN DS {ds_rr.to_text()}\n")
+    if ds_rr is not None:
+        with open(os.path.join(keydir, basename + ".ds"), "w",
+                  encoding="utf-8") as f:
+            f.write(f"{zone.to_text()} IN DS {ds_rr.to_text()}\n")
     return basename
 
 
@@ -134,14 +141,22 @@ if __name__ == '__main__':
     print(DNSKEY_RRSET)
     print('')
 
-    ds = dns.dnssec.make_ds(ZONE, dnskey_rdata, algorithm=2)
-    print("### DS record")
-    print(ds)
+    # DS is only emitted for SEP keys (KSK/CSK): a plain ZONE-flag key (ZSK) is
+    # not a secure entry point in common operator practice, so no DS is useful.
+    # (SEP is advisory, so a ZSK *could* be secured by a DS in the parent; if
+    # ever needed, its DS is easy to derive separately from the DNSKEY.)
+    ds = (dns.dnssec.make_ds(ZONE, dnskey_rdata, algorithm=2)
+          if CONFIG.flags & SEP else None)
+    if ds is not None:
+        print("### DS record")
+        print(ds)
 
     if CONFIG.keydir:
         BASENAME = write_key_triple(CONFIG.keydir, ZONE, CONFIG.algorithm,
                                     keytag, PRIVATE_KEY, DNSKEY_RRSET, ds,
                                     prepublish=CONFIG.prepublish)
         PEM_SUFFIX = "prepublish.pem" if CONFIG.prepublish else "pem"
+        FILES = f"{{{PEM_SUFFIX},dnskey,ds}}" if ds is not None \
+            else f"{{{PEM_SUFFIX},dnskey}}"
         print('')
-        print(f"### Wrote key files: {BASENAME}.{{{PEM_SUFFIX},dnskey,ds}}")
+        print(f"### Wrote key files: {BASENAME}.{FILES}")

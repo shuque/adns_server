@@ -113,19 +113,25 @@ discovery above. **Activation is a rename** (`.prepublish.pem` →
 
 Companion change: `adnskeygen.py` gains a `--keydir DIR` option (opt-in; absent it
 keeps its current stdout-only behavior). When given, it writes a self-consistent
-keytag-named triple into the keydir, and also keeps printing DNSKEY/DS to stdout:
+keytag-named set into the keydir, and also keeps printing DNSKEY (and, for SEP
+keys, DS) to stdout:
 - `<zone>+<alg>+<keytag>.pem` — PEM PKCS8 private key (the signer's input).
 - `<zone>+<alg>+<keytag>.dnskey` — the full DNSKEY RR (ready to `$INCLUDE` or
   paste into the zonefile), not bare base64.
 - `<zone>+<alg>+<keytag>.ds` — the DS RR for the parent (alg 2 / SHA-256).
+  **Written only for SEP keys** (KSK/CSK, DNSKEY flags bit `SEP`=1); a plain
+  ZONE-flag ZSK gets no DS (stdout or file), matching common operator practice
+  where only KSKs/CSKs have a referring DS in the parent. (SEP is advisory, so a
+  ZSK could in principle be a secure entry point; its DS is easily derived
+  separately if ever needed.)
 
 This keytag-based scheme is what the multi-key signer needs; it is additive and
 does not disturb the existing per-zone `privkey.pem` / `pubkey.key` / `dsset-*`
 files the running server uses.
 
 `adnskeygen.py` also gains a `--prepublish` flag: it writes the private key as
-`<zone>+<alg>+<keytag>.prepublish.pem` (still emitting the `.dnskey`/`.ds`
-companions normally) so the DNSKEY can be added to the zone and pre-published
+`<zone>+<alg>+<keytag>.prepublish.pem` (still emitting the `.dnskey` companion,
+and `.ds` if a SEP key) so the DNSKEY can be added to the zone and pre-published
 while the signer ignores the altered-suffix PEM until it is renamed to activate
 (§2).
 

@@ -70,9 +70,9 @@ def test_adnskeygen_prepublish_writes_prepublish_pem(tmp_path):
              if not p.name.endswith(".prepublish.pem")]
     assert not plain            # no active .pem was written
     base = prepub[0].name[:-len(".prepublish.pem")]
-    # The .dnskey and .ds companions are written unchanged.
+    # The .dnskey companion is written; no .ds since this is a ZSK (-f 256).
     assert (keydir / (base + ".dnskey")).exists()
-    assert (keydir / (base + ".ds")).exists()
+    assert not (keydir / (base + ".ds")).exists()
     # Private key file is owner-only (0600).
     assert (prepub[0].stat().st_mode & 0o777) == 0o600
 
@@ -84,6 +84,28 @@ def test_adnskeygen_prepublish_requires_keydir():
         capture_output=True, text=True)
     assert result.returncode != 0
     assert "requires -K" in result.stderr
+
+
+def test_adnskeygen_ds_only_for_sep_key(tmp_path):
+    # DS is emitted (stdout + .ds file) only for SEP keys (KSK/CSK). A KSK
+    # (-f 257) gets a .ds; a ZSK (-f 256) does not.
+    ksk_dir = tmp_path / "ksk"
+    ksk = subprocess.run(
+        [sys.executable, GENKEY, "sep.test", "-a", "13", "-f", "257",
+         "--keydir", str(ksk_dir)],
+        capture_output=True, text=True, check=True)
+    ds = list(ksk_dir.glob("sep.test+013+*.ds"))
+    assert len(ds) == 1
+    assert "### DS record" in ksk.stdout
+
+    zsk_dir = tmp_path / "zsk"
+    zsk = subprocess.run(
+        [sys.executable, GENKEY, "sep.test", "-a", "13", "-f", "256",
+         "--keydir", str(zsk_dir)],
+        capture_output=True, text=True, check=True)
+    assert not list(zsk_dir.glob("sep.test+013+*.ds"))
+    assert list(zsk_dir.glob("sep.test+013+*.dnskey"))   # .dnskey still written
+    assert "### DS record" not in zsk.stdout
 
 
 import dns.name          # noqa: E402
