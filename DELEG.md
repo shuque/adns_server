@@ -35,8 +35,8 @@ defined in the `RRtype` and `EdnsFlag` enums:
 - **EDE "New Delegation Only"** — `EDECode.NEW_DELEGATION_ONLY` (INFO-CODE 34).
   Added to DE=0 responses for a DELEG-only cut (deleg-11 5.2.2.1).
 
-A zone opts in to DELEG handling with `deleg_enabled: true` in the config
-(`Zone.deleg_enabled`). Without it, DELEG records are just opaque data.
+DELEG handling is always active: any `TYPE61440` RRset in a served zone is
+treated as a delegation type. There is no per-zone opt-in flag.
 
 ## Functional summary
 
@@ -85,7 +85,7 @@ answers.
 
 Serving DELEG and offering *downgrade resistance* for DELEG are two
 independent things. This server acts as a DELEG authority whenever a
-zone has `deleg_enabled: true` and carries DELEG records; it does
+zone carries DELEG records; it does
 **not** require the zone to be signed, and it does **not** require (or
 even inspect) the DNSKEY-ADT flag. The DNSKEY-ADT flag is a signal
 *for validating resolvers* (delext 6.1/6.2 — "indicates to a validator
@@ -133,7 +133,6 @@ neither sets it nor depends on it.
 | `EDECode.NEW_DELEGATION_ONLY` | "New Delegation Only" EDE (INFO-CODE 34) |
 | `AUTH_IN_PARENT_RRTYPES` | `[DS, DELEG]` — types answered at the cut instead of referred |
 | `deleg_ext_ok(message)` | Is the DE flag set on the query? |
-| `Zone.deleg_enabled` | Per-zone opt-in to DELEG handling |
 | `process_name()` | Detects the cut (NS and/or DELEG); routes DE=1 vs DE=0; handles DE=0 occlusion |
 | `do_referral()` | Referral dispatch: DELEG-aware vs traditional |
 | `do_referral_deleg()` | DE=1 referral (DELEG RRset, DS-or-NSEC, DELEG-absence proof) |

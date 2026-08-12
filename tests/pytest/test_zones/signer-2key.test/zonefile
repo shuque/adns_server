@@ -1,0 +1,38 @@
+$TTL 86400
+$ORIGIN signer-2key.test.
+@		IN	SOA	ns.signer-2key.test. hostmaster.signer-2key.test. (
+				1          ; Serial
+				43200      ; Refresh
+				3600       ; Retry
+				3628800    ; Expire
+				3600 )     ; Minimum
+		IN	NS	ns.signer-2key.test.
+;;
+;; Two active keys, the classic BIND KSK(257)/ZSK(256) split (dnssec-signzone
+;; -S -x): classify_signers() signs the DNSKEY RRset with the SEP key and
+;; everything else with the ZSK. This is the shape of the real m1/m3.huque.com
+;; zones. NSEC3 with a non-empty salt and non-zero iterations -- RFC 9276
+;; recommends '1 0 0 -', but many production zones still use salt+iterations,
+;; so this exercises that path (the m3.huque.com analog).
+;;
+		IN	NSEC3PARAM 1 0 5 5EBA4328
+$INCLUDE signer-2key.test/dnskey.txt
+;;
+;; Apex nameserver and a couple of ordinary names.
+;;
+ns		IN	A	192.0.2.1
+www		IN	A	192.0.2.10
+www		IN	AAAA	2001:db8::10
+;;
+;; Empty non-terminal: 'ent'/'deep.ent' own no RRset; host.deep.ent does.
+;;
+host.deep.ent	IN	A	192.0.2.30
+;;
+;; Secure delegation with a data RRset (TXT) sitting AT the cut -- the
+;; m3.huque.com 'newsub' shape that caught the bitmap-occlusion bug. The TXT
+;; must be neither signed nor listed in the cut's NSEC3 bitmap.
+;;
+sub		IN	NS	ns1.sub.signer-2key.test.
+sub		IN	DS	40524 13 2 0000000000000000000000000000000000000000000000000000000000000001
+sub		IN	TXT	"occluded at the cut"
+ns1.sub		IN	A	192.0.2.2

@@ -34,3 +34,11 @@ exact.wild	IN	A	192.0.2.21
 ;; records of their own) -- exercises ENT NODATA (matching NSEC, NSEC+RRSIG).
 ;;
 host.deep.ent	IN	A	192.0.2.30
+;;
+;; DELEG-only cut (no NS, no DS): invisible to DE=0 clients. Present here to
+;; exercise DE=0 occlusion in a white-lie (RFC 4470, compact_denial: false)
+;; zone -- the occlusion NXDOMAIN must be proven with the cut's matching NSEC
+;; (special covering next-name + DELEG bit), NOT a white-lie synthesized around
+;; the query name that would drop the DELEG bit.
+;;
+degonly		IN	TYPE61440 \# 26 00000a636f6e66696731323334076578616d706c6503636f6d00

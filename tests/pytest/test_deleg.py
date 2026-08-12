@@ -7,7 +7,11 @@ unsigned.test zone. Signatures are cryptographically validated; NSEC/NSEC3
 proofs are checked for correct coverage and type-bitmap contents.
 """
 
+import pytest
+
 import dnsutil as du
+
+pytestmark = pytest.mark.deleg
 
 DELEG = "TYPE61440"
 NXNAME = "TYPE128"
@@ -106,6 +110,11 @@ def test_de0_below_deleg_only_cut_is_nxdomain(query, dnskey):
     assert du.nsec_matches(nsec, "sub5.deleg.test")
     assert du.nsec_covers(nsec, "www.sub5.deleg.test")
     assert DELEG in du.nsec_bitmap(nsec)
+    # CDOE decision (DELEG.md): even in a compact-denial zone the occlusion
+    # proof stays a covering NSEC matching the cut -- it must NOT degrade to an
+    # NXNAME black lie at the query name, which would drop the DELEG bit and
+    # defeat downgrade detection.
+    assert NXNAME not in du.nsec_bitmap(nsec)
     du.validate_all(r, dnskey("deleg.test"), "deleg.test")
 
 
@@ -205,6 +214,7 @@ def test_de0_any_below_deleg_only_cut_is_occluded(query, dnskey):
     assert du.nsec_matches(nsec, "sub5.deleg.test")
     assert du.nsec_covers(nsec, "www.sub5.deleg.test")
     assert DELEG in du.nsec_bitmap(nsec)
+    assert NXNAME not in du.nsec_bitmap(nsec)   # no black lie (see above)
     du.validate_all(r, dnskey("deleg.test"), "deleg.test")
 
 
@@ -235,6 +245,56 @@ def test_nsec3_de0_occlusion_nxdomain(query, dnskey):
     assert any(du.nsec3_matches(n, "degonly.nsec3.test", "nsec3.test")
                and DELEG in du.nsec_bitmap(n) for n in nsec3s)
     du.validate_all(r, dnskey("nsec3.test"), "nsec3.test")
+
+
+# --------------------------------------------------------------------------
+# White-lie (RFC 4470, compact_denial: false) zone occlusion
+#
+# whitelies.test signs online with minimally-covering NSEC white lies. DELEG
+# occlusion must still be proven with the NSEC *matching the cut* (special
+# covering next-name + DELEG bit) per the CDOE decision -- NOT a white lie
+# synthesized around the query name, which would neither match the cut nor
+# carry the DELEG bit.
+# --------------------------------------------------------------------------
+
+def test_whitelies_de1_deleg_only(query, dnskey):
+    """whitelies.test degonly, DE=1: DELEG RRset + covering NSEC (DELEG bit)."""
+    r = query("foo.degonly.whitelies.test", "A", do=True, de=True)
+    assert DELEG in du.section_types(r.authority)
+    nsec = du.rrsets_of_type(r.authority, "NSEC")[0]
+    assert du.nsec_matches(nsec, "degonly.whitelies.test")
+    assert DELEG in du.nsec_bitmap(nsec)
+    du.validate_all(r, dnskey("whitelies.test"), "whitelies.test")
+
+
+def test_whitelies_de0_occlusion_nxdomain(query, dnskey):
+    """
+    whitelies.test degonly, DE=0, below cut: authoritative NXDOMAIN proven with
+    the NSEC matching the cut (covering next-name + DELEG bit), NOT a white lie
+    around the query name. New Delegation Only EDE present.
+    """
+    r = query("www.degonly.whitelies.test", "A", do=True, de=False)
+    assert du.rcode(r) == "NXDOMAIN"
+    assert du.has_flag(r, "AA")
+    assert 34 in du.ede_codes(r)
+    nsec = du.rrsets_of_type(r.authority, "NSEC")[0]
+    # Matches the cut and covers the queried name -- the covering next-name form,
+    # not a minimally-covering white lie synthesized around "www.degonly".
+    assert du.nsec_matches(nsec, "degonly.whitelies.test")
+    assert du.nsec_covers(nsec, "www.degonly.whitelies.test")
+    assert DELEG in du.nsec_bitmap(nsec)
+    assert NXNAME not in du.nsec_bitmap(nsec)
+    du.validate_all(r, dnskey("whitelies.test"), "whitelies.test")
+
+
+def test_whitelies_de0_at_cut_is_nodata(query, dnskey):
+    """whitelies.test degonly name itself, DE=0: authoritative NODATA + EDE."""
+    r = query("degonly.whitelies.test", "A", do=True, de=False)
+    assert du.rcode(r) == "NOERROR"
+    assert not r.answer
+    assert du.has_flag(r, "AA")
+    assert 34 in du.ede_codes(r)
+    du.validate_all(r, dnskey("whitelies.test"), "whitelies.test")
 
 
 # --------------------------------------------------------------------------

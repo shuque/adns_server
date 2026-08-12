@@ -42,9 +42,9 @@ the delegation point, is authoritative in the parent, and creates a zone cut.
 It uses the (pre-standardization) RR type code 61440 (`TYPE61440`); the
 associated DELEGPARAM indirection type uses code 65433.
 
-A per-zone configuration flag `deleg_enabled: true` is required to enable DELEG
-handling for a zone. DELEG-aware resolvers negotiate the feature with the
-EDNS(0) DE (Delegation Extensions) flag; the server tailors its referral and
+DELEG handling is always active: any `TYPE61440` RRset in a served zone is
+treated as a delegation type. DELEG-aware resolvers negotiate the feature with
+the EDNS(0) DE (Delegation Extensions) flag; the server tailors its referral and
 occlusion behavior to whether that flag is set. DELEG is supported in both
 signed and unsigned zones, and in referrals to signed or unsigned child zones.
 
@@ -87,7 +87,7 @@ pip3 install git+https://github.com/shuque/adns_server.git
 ```
 
 To install a specific released version, append the tag, e.g.
-`...adns_server.git@v0.10.0`.
+`...adns_server.git@v0.11.0`.
 
 ### Usage
 
@@ -148,14 +148,15 @@ zones:
     private_key: "/path/to/privatekey.pem"
 ```
 
-### Key Generation for Online Signing
+### Key Generation for DNSSEC Signing
 
-This repo also includes a small script, genkey.py, to help generate
-DNSSEC keys used for online signing configurations.
+This repo also includes a small script, adnskeygen.py, to help generate
+DNSSEC keys, used for both online signing configurations and offline
+signing with the signzone.py tool.
 
 ```
-$ ./genkey.py -h
-usage: genkey.py [-h] [-a N] [-f N] zone
+$ ./adnskeygen.py -h
+usage: adnskeygen.py [-h] [-a N] [-f N] [-K DIR] zone
 
 positional arguments:
   zone        DNS zone name
@@ -164,13 +165,14 @@ optional arguments:
   -h, --help  show this help message and exit
   -a N        DNSSEC algorithm number (default: 13)
   -f N        Value of DNSKEY flags field (default: 257)
+  -K DIR      write keytag-named .pem/.dnskey/.ds triple here
   ```
 
   An example usage to generate an ECDSA NIST P256 (algorithm 13)
   key for example.com follows.
 
   ```
-  $ ./genkey.py example.com
+  $ ./adnskeygen.py example.com
 ### Private Key file contents:
 -----BEGIN PRIVATE KEY-----
 XXXXXXX+++++++++++++++++++++REDACTEDKEY+++++++++++++++++XXXXXXXX
@@ -217,3 +219,24 @@ python3 -m pytest tests/pytest -v
 Set `ADNS_TEST_KEEP_LOG=1` to print the server log on teardown when debugging a
 startup failure. See `tests/pytest/README.md` for details on the fixtures,
 assertion helpers, and test zones.
+
+### Running a subset of the tests
+
+The suite defines pytest markers so functional areas can be run in isolation
+with `-m`:
+
+| Marker   | Selects                                                      |
+| -------- | ----------------------------------------------------------- |
+| `signer` | offline zone signer (`signzone.py`) tests — no running server |
+| `deleg`  | DELEG delegation-extension behavior tests                   |
+
+```
+python3 -m pytest tests/pytest -m signer    # just the signer tests
+python3 -m pytest tests/pytest -m deleg     # just the DELEG tests
+python3 -m pytest tests/pytest -m "not deleg"
+```
+
+The `signer` set is self-contained and never launches the server, so it runs
+in a fraction of the full-suite time. `pytest --markers` lists the registered
+markers. You can also select by path (`tests/pytest/test_signzone*.py`) or by
+node-name substring (`-k signzone`).

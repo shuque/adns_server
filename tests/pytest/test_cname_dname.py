@@ -69,6 +69,28 @@ def test_dname_synthesizes_cname(query, dnskey):
     du.validate_all(r, dnskey("deleg.test"), "deleg.test")
 
 
+def test_dname_occludes_name_below_owner(query, dnskey):
+    """
+    A name STRICTLY BELOW a DNAME owner is occluded (RFC 6672): the tree
+    descent hits the DNAME at the owner first and redirects, so an explicit
+    record below the owner is never served directly. host.old.deleg.test has
+    an A of 192.0.2.99 in the zone, but the query must be redirected via the
+    DNAME to host.new (192.0.2.40) -- the occluded 192.0.2.99 must not appear.
+    This pins the occlusion so a future change to the descent loop that stops
+    diverting on DNAME would fail here.
+    """
+    r = query("host.old.deleg.test", "A", do=True)
+    assert du.rcode(r) == "NOERROR"
+    assert du.has_flag(r, "AA")
+    dname = du.rrsets_of_type(r.answer, "DNAME")
+    assert dname and dname[0][0].target.to_text() == "new.deleg.test."
+    addrs = {rd.to_text() for rrset in du.rrsets_of_type(r.answer, "A")
+             for rd in rrset}
+    assert "192.0.2.40" in addrs        # served via the DNAME redirect
+    assert "192.0.2.99" not in addrs    # occluded record must never be served
+    du.validate_all(r, dnskey("deleg.test"), "deleg.test")
+
+
 def test_dname_direct_query(query, dnskey):
     """Querying the DNAME owner for DNAME returns the DNAME itself."""
     r = query("old.deleg.test", "DNAME", do=True)
