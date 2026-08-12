@@ -37,7 +37,7 @@ Issues = "https://github.com/shuque/check_zone_dnssec/issues"
 
 [tool.setuptools]
 py-modules = ["dnssec_util"]
-script-files = ['adns_server.py', 'adnskeygen.py']
+script-files = ['adns_server.py', 'adnskeygen.py', 'signzone.py']
 
 [tool.setuptools.dynamic]
 version = {attr = "adns_server.__version__"}
