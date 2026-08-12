@@ -24,7 +24,9 @@ signing it supports several methods of denial of existence:
   NSEC3PARAM record in the zone). An 'nsec_ideal_predecessor' preference selects
   the ideal (63-octet) predecessor form; the default is a shorter,
   human-readable sentinel form.
-* Traditional NSEC3 White Lies.
+* Traditional
+  [NSEC3 White Lies](https://www.rfc-editor.org/rfc/rfc7129.html#appendix-B)
+  (RFC 7129, Appendix B).
 
 The 'dnssec: true' parameter must be specified in the configuration file
 for signed zones. The 'dynamic_signing: true' and 'private_key: /path/to/privatekey.pem'
