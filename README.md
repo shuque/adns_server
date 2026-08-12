@@ -48,14 +48,18 @@ the EDNS(0) DE (Delegation Extensions) flag; the server tailors its referral and
 occlusion behavior to whether that flag is set. DELEG is supported in both
 signed and unsigned zones, and in referrals to signed or unsigned child zones.
 
-For signed zones, DELEG can currently only be used with the online signing
-modes. This is because most tools that generate pre-signed zones do not
-understand that DELEG is a delegation type that must be signed at the parent's
-delegation point (they treat it as non-authoritative glue and do not sign it,
-or mis-generate the delegation-point NSEC/NSEC3 bitmaps). This program
-recognizes the DELEG record, places it in the referral for the corresponding
-delegation, and generates the signature dynamically. (A future DELEG-aware
-zone signer would let the program also serve pre-signed zones with DELEG.)
+For signed zones, DELEG works with both the online signing modes and pre-signed
+zones. Most third-party tools that generate pre-signed zones do not understand
+that DELEG is a delegation type that must be signed at the parent's delegation
+point (they treat it as non-authoritative glue and do not sign it, or
+mis-generate the delegation-point NSEC/NSEC3 bitmaps). With online signing, this
+program recognizes the DELEG record, places it in the referral for the
+corresponding delegation, and generates the signature dynamically.
+
+For offline signing, the package includes a DELEG-aware zone signer,
+`signzone.py`, which signs the DELEG RRset at the cut and sets the DELEG bit in
+the delegation-point NSEC/NSEC3 bitmap, so the program can serve pre-signed
+zones with DELEG. See **[Signer.md](Signer.md)**.
 
 For the full details of the implementation — type codes and EDNS signaling, the
 DE=1 and DE=0 referral/occlusion behavior, the DNSSEC proofs used, the relevant
