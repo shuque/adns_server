@@ -10,8 +10,11 @@ key(s) sign the DNSKEY RRset and the ZSK(s) sign everything else, so a
 KSK/ZSK split or a single combined-signing key (CSK) both work with no
 flag. The mode of authenticated denial is data-driven: an apex NSEC3PARAM
 record makes the signer build an NSEC3 chain (using that record's
-parameters), otherwise it builds an NSEC chain. Key rollover (pre-published
-stand-by keys) and DELEG cut handling are later stages. See Signer.md.
+parameters), otherwise it builds an NSEC chain. DELEG cuts are signed
+authoritatively in the delegating zone: the DELEG (and any DS) RRset at a cut
+is signed and its type appears in the delegation-point NSEC/NSEC3 bitmap, while
+NS, glue, and names below the cut are occluded. Key rollover (pre-published
+stand-by keys) is a later stage. See Signer.md.
 """
 
 import argparse
@@ -413,6 +416,10 @@ def sign_zone(zone, keys, inception, base_expiration, jitter):
     Sign every authoritative RRset and build the denial-of-existence chain in
     place. The chain is NSEC3 if the apex has an NSEC3PARAM record, else NSEC.
     """
+    try:
+        zone.reject_wildcard_deleg()
+    except ValueError as exc:
+        raise SignerError(str(exc)) from exc
     dnskey_signers, rest_signers = classify_signers(keys)
     cut_names = _cut_names(zone)
     occluding_parents = _occluding_parents(zone, cut_names)

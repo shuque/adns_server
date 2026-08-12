@@ -42,9 +42,9 @@ the delegation point, is authoritative in the parent, and creates a zone cut.
 It uses the (pre-standardization) RR type code 61440 (`TYPE61440`); the
 associated DELEGPARAM indirection type uses code 65433.
 
-A per-zone configuration flag `deleg_enabled: true` is required to enable DELEG
-handling for a zone. DELEG-aware resolvers negotiate the feature with the
-EDNS(0) DE (Delegation Extensions) flag; the server tailors its referral and
+DELEG handling is always active: any `TYPE61440` RRset in a served zone is
+treated as a delegation type. DELEG-aware resolvers negotiate the feature with
+the EDNS(0) DE (Delegation Extensions) flag; the server tailors its referral and
 occlusion behavior to whether that flag is set. DELEG is supported in both
 signed and unsigned zones, and in referrals to signed or unsigned child zones.
 
@@ -87,7 +87,7 @@ pip3 install git+https://github.com/shuque/adns_server.git
 ```
 
 To install a specific released version, append the tag, e.g.
-`...adns_server.git@v0.10.0`.
+`...adns_server.git@v0.11.0`.
 
 ### Usage
 

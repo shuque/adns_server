@@ -3,8 +3,9 @@ Wildcard-DELEG hardening -- delext-10 4.4.
 
 "A wildcard owner name MUST NOT have Delegation Types." Wildcard expansion
 (RFC 4592) does not create delegation points, so a DELEG RRset at a '*' owner
-is prohibited. The server enforces this at zone-load time (Zone method
-reject_wildcard_deleg, gated on deleg_enabled) and aborts startup on violation.
+is prohibited. DELEG handling is always active, so the server enforces this at
+zone-load time (Zone method reject_wildcard_deleg) for every zone and aborts
+startup on violation.
 
 These are pure unit tests of the invariant against in-memory zones -- no server
 subprocess -- so they are fast and independent of the live-server fixtures.
@@ -31,17 +32,15 @@ DELEG_GENERIC = ("TYPE61440 \\# 26 "
                  "00000a636f6e66696731323334076578616d706c6503636f6d00")
 
 
-def _zone(records, deleg_enabled=True):
+def _zone(records):
     """Build a Zone from apex boilerplate plus the given record lines."""
     text = ("$ORIGIN wild.test.\n"
             "$TTL 3600\n"
             "@ IN SOA ns hostmaster 1 43200 3600 3628800 3600\n"
             "@ IN NS ns\n"
             + "\n".join(records) + "\n")
-    zone = dns.zone.from_text(text, origin="wild.test.",
+    return dns.zone.from_text(text, origin="wild.test.",
                               zone_factory=adns.Zone, relativize=False)
-    zone.deleg_enabled = deleg_enabled
-    return zone
 
 
 def test_wildcard_deleg_is_rejected():
@@ -78,8 +77,8 @@ def test_star_not_leftmost_is_not_a_wildcard():
 
 
 # --------------------------------------------------------------------------
-# Load-time wiring: make_single_zone() aborts on a wildcard-DELEG zone, but
-# only when the zone is deleg_enabled.
+# Load-time wiring: make_single_zone() aborts on a wildcard-DELEG zone. DELEG
+# handling is always active, so this holds for every zone.
 # --------------------------------------------------------------------------
 
 ZONE_TEXT = ("$ORIGIN wild.test.\n"
@@ -96,20 +95,8 @@ def _write_zone(tmp_path):
 
 
 def test_load_aborts_on_wildcard_deleg(tmp_path):
-    """A deleg_enabled zone with a wildcard DELEG aborts startup (SystemExit)."""
+    """A zone with a wildcard DELEG aborts startup (SystemExit)."""
     prefs = adns.Preferences()
-    config = {"file": _write_zone(tmp_path), "deleg_enabled": True}
+    config = {"file": _write_zone(tmp_path)}
     with pytest.raises(SystemExit):
         adns.make_single_zone(prefs, dns.name.from_text("wild.test."), config)
-
-
-def test_load_allows_wildcard_deleg_when_not_deleg_enabled(tmp_path):
-    """
-    Without deleg_enabled the same TYPE61440 record is opaque data, 4.4 does
-    not apply, and the zone loads without error.
-    """
-    prefs = adns.Preferences()
-    config = {"file": _write_zone(tmp_path)}   # deleg_enabled defaults to False
-    zone = adns.make_single_zone(prefs, dns.name.from_text("wild.test."),
-                                 config)
-    assert zone.deleg_enabled is False

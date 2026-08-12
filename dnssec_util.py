@@ -81,7 +81,6 @@ class Zone(dns.zone.Zone):
         self.privatekey = None
         self.signing_dnskey = None
         self.compact_denial = False
-        self.deleg_enabled = False
         self.udp_truncate_all = False
         self.require_server_cookie = False
         self.keytag = None
@@ -250,8 +249,8 @@ class Zone(dns.zone.Zone):
         Enforce delext-10 4.4: a wildcard owner name MUST NOT have Delegation
         Types. Wildcard expansion (RFC 4592) does not create delegation points,
         so a DELEG RRset at a '*' owner is prohibited. Raises ValueError on the
-        first offending owner. Only meaningful when deleg_enabled is set (else
-        DELEG is opaque data); the caller gates on that.
+        first offending owner. DELEG handling is always active, so this is
+        enforced for every zone at load (and by the offline signer).
         """
         for name, node in self.nodes.items():
             if name.labels[0] != b'*':

@@ -276,6 +276,14 @@ everything else with every non-SEP key that has a PEM** (a CSK counts as both).
 
 ## 5. DELEG signing
 
+**Status: implemented (2026-08-11).** The signer is always DELEG-aware — there
+is no opt-in flag, mirroring the server, which is unconditionally DELEG-capable
+for every zone it serves (the old `deleg_enabled` config key / `Zone` attribute
+was removed). Any `TYPE61440` RRset in the input zone is signed as an
+authoritative-in-parent delegation type. Because both consumers now share
+`AUTH_IN_PARENT_RRTYPES` from `dnssec_util.py` and neither has a mode toggle,
+the signer's output cannot disagree with how the server serves the same zone.
+
 The offline signer treats DELEG purely as **DS-like authoritative parent data**;
 none of the serving-time referral/occlusion logic lives here. It needs three
 things, all already accommodated by §§3–4:
@@ -308,6 +316,12 @@ A DELEG-only cut (no NS, no glue) has its authoritative DELEG covered by RRSIG
 and otherwise looks like a normal signed node with an NSEC/NSEC3 — the intended
 on-the-wire result, matching what the running server serves.
 
+**Wildcard-DELEG fail-fast (delext-10 §4.4).** "A wildcard owner name MUST NOT
+have Delegation Types." `sign_zone()` calls `zone.reject_wildcard_deleg()` (the
+shared `Zone` method) before doing any work; a violation raises `SignerError`,
+so the run exits nonzero with no `.signed` output — the same invariant the
+server enforces at zone load.
+
 Reference: DELEG records are signed like DS (authoritative at the delegation
 point). See DELEG.md for the serving-side semantics.
 
@@ -326,8 +340,8 @@ stage is independently testable and committable.
 - **Stage 2 — NSEC3 signer.** NSEC3PARAM-driven mode; hash-sorted chain.
 - **Stage 3 — Multi-key / rollover.** KSK+ZSK split, double-KSK, ZSK
   pre-publish — mostly emergent from Stage 1 key classification.
-- **Stage 4 — DELEG.** Cut predicate includes DELEG; verify bitmap + RRSIG at
-  cuts.
+- **Stage 4 — DELEG (done, 2026-08-11).** Cut predicate includes DELEG; bitmap +
+  RRSIG at cuts verified; always-on (no flag) and wildcard-DELEG fail-fast.
 
 ## 7. Testing
 
@@ -344,13 +358,23 @@ Fits the existing `tests/pytest/` harness.
 - **`dnssec-verify` (BIND 9.20.x, Homebrew) as an independent oracle:** run it
   on our `.signed` output to confirm complete RRSIG coverage and a valid chain
   of denial, verified by a mature implementation independent of our own
-  round-trip checks. (Note: `dnssec-verify` predates DELEG and won't understand
-  DELEG cuts; use it on standard NSEC/NSEC3 zones, and rely on the
-  serve-through-`adns_server.py` + dnsviz path for the DELEG-specific checks.)
-- **DELEG-specific:** sign `deleg.huque.com`; confirm each cut's DELEG RRset has
-  an RRSIG and the cut's NSEC/NSEC3 bitmap has the DELEG bit; then **serve the
-  signed zone through `adns_server.py` and run the pytest suite + dnsviz** — the
-  real acceptance test (closes the loop with the running server).
+  round-trip checks. (Note: `dnssec-verify` predates DELEG and treats
+  `TYPE61440` as ordinary data — it rejects the authoritative-in-parent signing
+  as spurious RRSIGs / bitmap mismatches. So the shared oracle fixtures
+  (`signer-nsec.test`, `signer-nsec3.test`) are kept **DELEG-free**, and the
+  DELEG-specific checks rely on the round-trip validator plus the
+  serve-through-`adns_server.py` + dnsviz path.)
+- **DELEG-specific (implemented, `test_signzone.py`):** `test_deleg_signed_at_cut`
+  (NSEC) and `test_nsec3_deleg_signed_at_cut` (NSEC3) inject a DELEG matrix into
+  the loaded fixture in memory (a DELEG-only cut `delegonly` with occluded
+  `x.delegonly`, and an NS+DELEG cut `nsdeleg`), sign, and assert: DELEG is
+  covered by RRSIG at both cuts, NS is not signed, the cut's NSEC/NSEC3 bitmap
+  carries the DELEG bit, and the subtree below a DELEG-only cut is occluded (no
+  RRSIG, no NSEC/NSEC3). `test_wildcard_deleg_fails_fast` asserts a
+  wildcard-DELEG zone raises `SignerError` and leaves the zone unsigned. The
+  matrix is injected rather than committed to the fixture so the BIND oracle
+  above stays usable. The full acceptance loop remains **serve the signed zone
+  through `adns_server.py` + dnsviz**.
 - **Determinism:** signing twice with fixed inception/expiration + `-j 0`
   produces byte-identical output.
 
@@ -358,7 +382,8 @@ Fits the existing `tests/pytest/` harness.
 
 Fail-fast, no partial output (temp file + atomic rename on success):
 - No PEM for *any* key, unparseable key, no DNSKEY in zone, malformed zonefile,
-  >1 NSEC3PARAM → clear stderr message, nonzero exit, no `.signed` written.
+  >1 NSEC3PARAM, wildcard owner with a DELEG RRset (delext-10 §4.4) → clear
+  stderr message, nonzero exit, no `.signed` written.
 - Publish-only keys (DNSKEY present, no PEM) → not an error; noted under `-v`.
 - Zone load failure → propagate dnspython's parse error with file/line context.
 

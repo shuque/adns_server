@@ -9,25 +9,22 @@ config:
   edns: 1432
   minimal_any: true
 zones:
-  # NSEC, online signing, compact denial, DELEG enabled (DNSKEY-ADT set).
+  # NSEC, online signing, compact denial (DNSKEY-ADT set).
   - name: "deleg.test"
     file: "deleg.test/zonefile"
     dnssec: true
     dynamic_signing: true
     compact_denial: true
     private_key: "deleg.test/privkey.pem"
-    deleg_enabled: true
 
-  # NSEC3, online signing, DELEG enabled.
+  # NSEC3, online signing.
   - name: "nsec3.test"
     file: "nsec3.test/zonefile"
     dnssec: true
     dynamic_signing: true
     private_key: "nsec3.test/privkey.pem"
-    deleg_enabled: true
 
-  # Unsigned zone, DELEG enabled.
+  # Unsigned zone.
   - name: "unsigned.test"
     file: "unsigned.test/zonefile"
     dnssec: false
-    deleg_enabled: true

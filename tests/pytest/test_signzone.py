@@ -73,6 +73,50 @@ def _load_fixture():
         os.chdir(cwd)
 
 
+def _inject_deleg_matrix(zone, zone_name):
+    """
+    Add a DELEG cut matrix to an in-memory zone: a DELEG-only cut
+    ('delegonly' + occluded 'x.delegonly') and an NS+DELEG cut ('nsdeleg' +
+    glue). Kept out of the on-disk fixtures because BIND's dnssec-verify (the
+    oracle in test_signzone_oracle.py) treats TYPE61440 as ordinary data and
+    would reject the authoritative-in-parent signing.
+    """
+    import dns.rdata
+    deleg_wire = (r"\# 26 "
+                  "00000a636f6e66696731323334076578616d706c6503636f6d00")
+    deleg = dnssec_util.RRtype.DELEG
+
+    def add(owner, rdtype, text):
+        name = dns.name.from_text(owner + "." + zone_name + ".")
+        rdata = dns.rdata.from_text(dns.rdataclass.IN, rdtype, text)
+        zone.find_rdataset(name, rdtype, create=True).add(rdata, 3600)
+
+    add("delegonly", deleg, deleg_wire)
+    add("x.delegonly", dns.rdatatype.A, "192.0.2.50")
+    add("nsdeleg", dns.rdatatype.NS, "ns1.nsdeleg." + zone_name + ".")
+    add("nsdeleg", deleg, deleg_wire)
+    add("ns1.nsdeleg", dns.rdatatype.A, "192.0.2.51")
+
+
+def _sign_with_deleg(zone_name, keysubdir, jitter=0):
+    """Load the named fixture, inject the DELEG matrix, strip, and sign it."""
+    sz = _signzone()
+    cwd = os.getcwd()
+    os.chdir(ZONE_DIR)
+    try:
+        zone = dnssec_util.zone_from_file(
+            dns.name.from_text(zone_name), keysubdir + "/zonefile")
+    finally:
+        os.chdir(cwd)
+    keydir = os.path.join(ZONE_DIR, keysubdir)
+    keys = sz.discover_keys(zone, keydir)
+    _inject_deleg_matrix(zone, zone_name)
+    sz.strip_dnssec(zone)
+    now = 1_700_000_000
+    sz.sign_zone(zone, keys, now - 3600, now + 2592000, jitter)
+    return zone, keys
+
+
 def test_fixture_shape():
     zone = _load_fixture()
     origin = dns.name.from_text(NSEC_ZONE_NAME)
@@ -246,6 +290,68 @@ def test_dname_owner_signed_but_subtree_occluded():
     btypes = {r.rdtype for r in bnode.rdatasets}
     assert dns.rdatatype.RRSIG not in btypes
     assert dns.rdatatype.NSEC not in btypes
+
+
+def test_deleg_signed_at_cut():
+    # DELEG (TYPE61440) is authoritative-in-parent (delext-10): at a cut it is
+    # signed and its type appears in the delegation-point NSEC bitmap, exactly
+    # like DS. NS is not signed. A DELEG-only cut (no NS) still occludes its
+    # subtree.
+    deleg = dnssec_util.RRtype.DELEG
+    zone, _keys = _sign_with_deleg(NSEC_ZONE_NAME, "signer-nsec.test")
+    # DELEG-only cut: DELEG + NSEC signed, DELEG bit in the bitmap.
+    donly = dns.name.from_text("delegonly." + NSEC_ZONE_NAME + ".")
+    dnode = zone.get_node(donly)
+    dcovers = {r.covers for r in dnode.rdatasets
+               if r.rdtype == dns.rdatatype.RRSIG}
+    assert deleg in dcovers
+    assert dns.rdatatype.NSEC in dcovers
+    dnsec = dnode.get_rdataset(dns.rdataclass.IN, dns.rdatatype.NSEC)[0]
+    assert deleg in _nsec_types(dnsec)
+    assert dns.rdatatype.NS not in _nsec_types(dnsec)
+    # Subtree below the DELEG-only cut is occluded: neither signed nor NSEC'd.
+    below = dns.name.from_text("x.delegonly." + NSEC_ZONE_NAME + ".")
+    btypes = {r.rdtype for r in zone.get_node(below).rdatasets}
+    assert dns.rdatatype.RRSIG not in btypes
+    assert dns.rdatatype.NSEC not in btypes
+    # NS+DELEG cut: DELEG signed, NS not; bitmap has NS and DELEG.
+    nsd = dns.name.from_text("nsdeleg." + NSEC_ZONE_NAME + ".")
+    nnode = zone.get_node(nsd)
+    ncovers = {r.covers for r in nnode.rdatasets
+               if r.rdtype == dns.rdatatype.RRSIG}
+    assert deleg in ncovers
+    assert dns.rdatatype.NS not in ncovers
+    nnsec = nnode.get_rdataset(dns.rdataclass.IN, dns.rdatatype.NSEC)[0]
+    assert {dns.rdatatype.NS, deleg} <= _nsec_types(nnsec)
+
+
+def test_wildcard_deleg_fails_fast():
+    # delext-10 4.4: "A wildcard owner name MUST NOT have Delegation Types."
+    # The signer enforces this before doing any work: sign_zone must raise
+    # SignerError and leave the zone unsigned (no RRSIG/NSEC records added).
+    import dns.rdata
+    import dns.rdataset
+    sz = _signzone()
+    zone = _load_fixture()
+    keydir = os.path.join(ZONE_DIR, "signer-nsec.test")
+    keys = sz.discover_keys(zone, keydir)
+    sz.strip_dnssec(zone)
+    # Plant a DELEG RRset at a wildcard owner.
+    star = dns.name.from_text("*.bad." + NSEC_ZONE_NAME + ".")
+    rdata = dns.rdata.from_text(dns.rdataclass.IN, dnssec_util.RRtype.DELEG,
+                                r"\# 26 "
+                                "00000a636f6e66696731323334076578616d706c65"
+                                "03636f6d00")
+    zone.find_rdataset(star, dnssec_util.RRtype.DELEG,
+                       create=True).add(rdata, 3600)
+    now = 1_700_000_000
+    with pytest.raises(sz.SignerError, match="4.4"):
+        sz.sign_zone(zone, keys, now - 3600, now + 2592000, 0)
+    # Fail-fast: nothing was signed.
+    for _name, node in zone.nodes.items():
+        for rds in node.rdatasets:
+            assert rds.rdtype not in (dns.rdatatype.RRSIG, dns.rdatatype.NSEC,
+                                      dns.rdatatype.NSEC3)
 
 
 def _nsec_types(nsec):
@@ -458,6 +564,34 @@ def test_nsec3_dname_owner_is_hashed_and_signed():
     n3 = _nsec3_records(zone)
     assert owner in n3
     assert dns.rdatatype.DNAME in _nsec_types(n3[owner])
+
+
+def test_nsec3_deleg_signed_at_cut():
+    # DELEG at a cut is signed and its type appears in the delegation-point
+    # NSEC3 bitmap (mirrors the NSEC-mode test). The DELEG-only cut occludes its
+    # subtree.
+    deleg = dnssec_util.RRtype.DELEG
+    zone, _keys = _sign_with_deleg(NSEC3_ZONE_NAME, "signer-nsec3.test")
+    n3 = _nsec3_records(zone)
+    donly = dns.name.from_text("delegonly." + NSEC3_ZONE_NAME + ".")
+    dcovers = {r.covers for r in zone.get_node(donly).rdatasets
+               if r.rdtype == dns.rdatatype.RRSIG}
+    assert deleg in dcovers
+    dbitmap = _nsec_types(n3[_hashed(zone, donly)])
+    assert deleg in dbitmap
+    assert dns.rdatatype.NS not in dbitmap
+    # Subtree below the DELEG-only cut is occluded: no NSEC3, not signed.
+    below = dns.name.from_text("x.delegonly." + NSEC3_ZONE_NAME + ".")
+    assert _hashed(zone, below) not in n3
+    assert dns.rdatatype.RRSIG not in {r.rdtype
+                                       for r in zone.get_node(below).rdatasets}
+    # NS+DELEG cut: DELEG signed, NS not; bitmap has NS and DELEG.
+    nsd = dns.name.from_text("nsdeleg." + NSEC3_ZONE_NAME + ".")
+    ncovers = {r.covers for r in zone.get_node(nsd).rdatasets
+               if r.rdtype == dns.rdatatype.RRSIG}
+    assert deleg in ncovers
+    assert dns.rdatatype.NS not in ncovers
+    assert {dns.rdatatype.NS, deleg} <= _nsec_types(n3[_hashed(zone, nsd)])
 
 
 # base32hex (extended-hex, RFC 4648) label -> standard base32, for decoding an

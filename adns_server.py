@@ -68,7 +68,7 @@ from dnssec_util import (  # pylint: disable=unused-import
 )
 
 
-__version__ = '0.10.0'
+__version__ = '0.11.0'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'
@@ -284,13 +284,11 @@ def make_single_zone(prefs, zonename, config):
             privatekey = load_private_key(privatekey_path)
             zone.init_key(privatekey)
             zone.compact_denial = config.get('compact_denial', False)
-    zone.deleg_enabled = config.get('deleg_enabled', False)
-    if zone.deleg_enabled:
-        try:
-            zone.reject_wildcard_deleg()
-        except ValueError as exc_info:
-            print(f"error: load zone {zonename} failed: {exc_info}")
-            sys.exit(1)
+    try:
+        zone.reject_wildcard_deleg()
+    except ValueError as exc_info:
+        print(f"error: load zone {zonename} failed: {exc_info}")
+        sys.exit(1)
     zone.udp_truncate_all = config.get('udp_truncate_all', False)
     zone.require_server_cookie = config.get('require_server_cookie', False)
     return zone
@@ -1272,7 +1270,7 @@ class DNSresponse:
         """Generate referral response to child zone"""
 
         self.is_referral = True
-        if zobj.deleg_enabled and deleg_ext_ok(self.query.message):
+        if deleg_ext_ok(self.query.message):
             self.do_referral_deleg(zobj, sname)
             return
 
@@ -1521,16 +1519,15 @@ class DNSresponse:
             self.process_dname(zobj, qname, sname, stype, dname_rdataset)
             return True
 
-        # Look for delegation. A delegation point has an NS RRset and/or,
-        # for DELEG-enabled zones, a DELEG RRset. A DELEG-aware client (DE=1)
-        # gets a DELEG-aware referral; a DELEG-unaware client (DE=0) is served
-        # per non-DELEG specifications, i.e. NS occludes DELEG, and a
-        # DELEG-only cut (no NS) is an invisible/occluded namespace.
+        # Look for delegation. A delegation point has an NS RRset and/or a
+        # DELEG RRset. A DELEG-aware client (DE=1) gets a DELEG-aware referral;
+        # a DELEG-unaware client (DE=0) is served per non-DELEG specifications,
+        # i.e. NS occludes DELEG, and a DELEG-only cut (no NS) is an
+        # invisible/occluded namespace.
         if sname != zobj.origin:
             ns_rdataset = zobj.get_rdataset(sname, dns.rdatatype.NS)
-            deleg_rrset = (zobj.get_rrset(sname, RRtype.DELEG)
-                           if zobj.deleg_enabled else None)
-            de_aware = zobj.deleg_enabled and deleg_ext_ok(self.query.message)
+            deleg_rrset = zobj.get_rrset(sname, RRtype.DELEG)
+            de_aware = deleg_ext_ok(self.query.message)
             is_cut = bool(ns_rdataset) or bool(deleg_rrset)
             if is_cut and ((qname != sname) or
                            (stype not in AUTH_IN_PARENT_RRTYPES)):
