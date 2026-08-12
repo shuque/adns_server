@@ -150,12 +150,12 @@ zones:
 
 ### Key Generation for Online Signing
 
-This repo also includes a small script, genkey.py, to help generate
+This repo also includes a small script, adnskeygen.py, to help generate
 DNSSEC keys used for online signing configurations.
 
 ```
-$ ./genkey.py -h
-usage: genkey.py [-h] [-a N] [-f N] zone
+$ ./adnskeygen.py -h
+usage: adnskeygen.py [-h] [-a N] [-f N] [-K DIR] zone
 
 positional arguments:
   zone        DNS zone name
@@ -164,13 +164,14 @@ optional arguments:
   -h, --help  show this help message and exit
   -a N        DNSSEC algorithm number (default: 13)
   -f N        Value of DNSKEY flags field (default: 257)
+  -K DIR      write keytag-named .pem/.dnskey/.ds triple here
   ```
 
   An example usage to generate an ECDSA NIST P256 (algorithm 13)
   key for example.com follows.
 
   ```
-  $ ./genkey.py example.com
+  $ ./adnskeygen.py example.com
 ### Private Key file contents:
 -----BEGIN PRIVATE KEY-----
 XXXXXXX+++++++++++++++++++++REDACTEDKEY+++++++++++++++++XXXXXXXX

@@ -22,10 +22,10 @@ def test_key_basename_format():
     assert dnssec_util.key_basename("x.test", 8, 42) == "x.test+008+00042"
 
 
-GENKEY = os.path.join(REPO_ROOT, "genkey.py")
+GENKEY = os.path.join(REPO_ROOT, "adnskeygen.py")
 
 
-def test_genkey_keydir_writes_triple(tmp_path):
+def test_adnskeygen_keydir_writes_triple(tmp_path):
     keydir = tmp_path / "keys"
     result = subprocess.run(
         [sys.executable, GENKEY, "signer-nsec.test", "-a", "13", "-f", "257",

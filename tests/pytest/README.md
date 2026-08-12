@@ -53,6 +53,6 @@ startup failure.
 - `nsec3.test` — NSEC3, DELEG enabled. Has a DELEG-only cut (`degonly`).
 - `unsigned.test` — unsigned, DELEG enabled.
 
-To regenerate a zone's key (if ever needed), see `genkey.py` in the repo root;
+To regenerate a zone's key (if ever needed), see `adnskeygen.py` in the repo root;
 the suite's keys live under `test_zones/<zone>/privkey.pem` with the matching
 DNSKEY in `dnskey.txt`.

@@ -45,7 +45,7 @@ def load_private_key(keyfile):
 
 
 def key_basename(zonename, algorithm, keytag):
-    """Return the keytag-named base filename (no extension) shared by genkey
+    """Return the keytag-named base filename (no extension) shared by adnskeygen
     and signzone: '<zonename>+<alg:03d>+<keytag:05d>'. zonename must be the
     origin text with any trailing dot stripped. Matches BIND's +%03d+%05d
     convention so the files are greppable and self-describing."""

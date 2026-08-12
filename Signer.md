@@ -104,14 +104,14 @@ publish-only rule is the entire rollover mechanism (§4).
 
 **Pre-publish keys.** A pre-published ZSK is, to the signer, simply a DNSKEY in
 the zone with no matching `<zone>+<alg>+<keytag>.pem` — it needs no special
-handling. For operator convenience, `genkey.py` (below) can park a pre-publish
+handling. For operator convenience, `adnskeygen.py` (below) can park a pre-publish
 key's private material under the altered name `<zone>+<alg>+<keytag>.prepublish.pem`
 so it lives alongside the active keys but is skipped by the exact-match
 discovery above. **Activation is a rename** (`.prepublish.pem` →
 `.pem`); retiring the previously-active key is deleting (or re-suffixing) its
 `.pem`. Greppable and auditable, and the signer needs zero pre-publish logic.
 
-Companion change: `genkey.py` gains a `--keydir DIR` option (opt-in; absent it
+Companion change: `adnskeygen.py` gains a `--keydir DIR` option (opt-in; absent it
 keeps its current stdout-only behavior). When given, it writes a self-consistent
 keytag-named triple into the keydir, and also keeps printing DNSKEY/DS to stdout:
 - `<zone>+<alg>+<keytag>.pem` — PEM PKCS8 private key (the signer's input).
@@ -123,7 +123,7 @@ This keytag-based scheme is what the multi-key signer needs; it is additive and
 does not disturb the existing per-zone `privkey.pem` / `pubkey.key` / `dsset-*`
 files the running server uses.
 
-`genkey.py` also gains a `--prepublish` flag: it writes the private key as
+`adnskeygen.py` also gains a `--prepublish` flag: it writes the private key as
 `<zone>+<alg>+<keytag>.prepublish.pem` (still emitting the `.dnskey`/`.ds`
 companions normally) so the DNSKEY can be added to the zone and pre-published
 while the signer ignores the altered-suffix PEM until it is renamed to activate
@@ -131,7 +131,7 @@ while the signer ignores the altered-suffix PEM until it is renamed to activate
 
 **ADT flag — no code change.** For a DELEG-enabled zone the operator sets the
 DNSKEY-ADT bit on the SEP key (KSK or CSK) to get full downgrade resistance
-(see DELEG.md). This is already accommodated by `genkey.py -f`: `-f 259`
+(see DELEG.md). This is already accommodated by `adnskeygen.py -f`: `-f 259`
 (ZONE 256 + SEP 1 + ADT 2) generates such a key. The signer treats the DNSKEY
 generically — it classifies keys on the SEP bit and signs the DNSKEY RRset with
 every SEP key that has a PEM, irrespective of the ADT bit — so no `signzone.py`
@@ -372,7 +372,7 @@ Stated explicitly:
   technique; a static signer produces conventional NSEC/NSEC3 only.
 - **Incremental / partial re-signing** — always strip-and-re-sign fresh.
 - **Serial management policy** beyond optional `--bump`.
-- **Key generation** — stays in `genkey.py` (which gains the keytag-named-PEM
+- **Key generation** — stays in `adnskeygen.py` (which gains the keytag-named-PEM
   companion option).
 - **Multi-algorithm zones** — out of scope for now (initial stages assume a
   single algorithm across the DNSKEY RRset). Noted here for when they are added:
