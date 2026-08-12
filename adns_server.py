@@ -68,7 +68,7 @@ from dnssec_util import (  # pylint: disable=unused-import
 )
 
 
-__version__ = '0.11.0'
+__version__ = '0.11.1'
 
 PROGNAME = os.path.basename(sys.argv[0])
 CONFIG_DEFAULT = 'adnsconfig.yaml'

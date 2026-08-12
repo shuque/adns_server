@@ -269,8 +269,6 @@ def zone_from_file(name, zonefile):
 
     zone = dns.zone.from_file(zonefile, origin=name, zone_factory=Zone,
                               relativize=False)
-    if not isinstance(zone.nodes, zone.map_factory):
-        zone.nodes = zone.map_factory(zone.nodes)
     zone.add_ent_nodes()
     zone.set_soa_min_ttl()
     return zone

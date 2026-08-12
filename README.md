@@ -59,7 +59,8 @@ corresponding delegation, and generates the signature dynamically.
 For offline signing, the package includes a DELEG-aware zone signer,
 `signzone.py`, which signs the DELEG RRset at the cut and sets the DELEG bit in
 the delegation-point NSEC/NSEC3 bitmap, so the program can serve pre-signed
-zones with DELEG. See **[Signer.md](Signer.md)**.
+zones with DELEG. See the offline-signer section of **[Design.md](Design.md)**
+(§8).
 
 For the full details of the implementation — type codes and EDNS signaling, the
 DE=1 and DE=0 referral/occlusion behavior, the DNSSEC proofs used, the relevant
@@ -91,7 +92,7 @@ pip3 install git+https://github.com/shuque/adns_server.git
 ```
 
 To install a specific released version, append the tag, e.g.
-`...adns_server.git@v0.11.0`.
+`...adns_server.git@v0.11.1`.
 
 ### Usage
 

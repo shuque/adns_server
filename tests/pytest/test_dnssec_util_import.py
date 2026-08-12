@@ -46,3 +46,37 @@ def test_adns_server_reexports_moved_symbols():
     # Re-exported objects must be the SAME objects as in dnssec_util
     assert adns_server.Zone is dnssec_util.Zone
     assert adns_server.successor_name is dnssec_util.successor_name
+
+
+def test_zone_nodes_use_map_factory(tmp_path):
+    """
+    zone_from_file must yield a zone whose node map is the Zone.map_factory
+    (SortedDict), not a plain dict. dnspython's zone reader honoring
+    map_factory is what the whole DNSSEC ordering model relies on; a
+    dnspython 2.0-era regression once remapped it back to dict (fixed before
+    our 2.7.0 floor). This guards against that regression returning, in place
+    of the defensive re-wrap zone_from_file used to carry.
+    """
+    import dns.name
+    from sortedcontainers import SortedDict
+
+    zonefile = tmp_path / "mf.test.zone"
+    zonefile.write_text(
+        "$ORIGIN mf.test.\n"
+        "$TTL 3600\n"
+        "@ IN SOA ns hostmaster 1 43200 3600 3628800 3600\n"
+        "@ IN NS ns\n"
+        "ns IN A 192.0.2.1\n"
+        "b.a IN A 192.0.2.2\n"
+        "z IN A 192.0.2.26\n"
+    )
+    zone = dnssec_util.zone_from_file(dns.name.from_text("mf.test."),
+                                      str(zonefile))
+    assert dnssec_util.Zone.map_factory is SortedDict
+    assert isinstance(zone.nodes, zone.map_factory)
+    # Keys are kept in canonical dns.name.Name order (apex first), which is
+    # what the covering-NSEC/NSEC3 searches depend on -- not text order.
+    keys = list(zone.nodes)
+    assert keys == sorted(keys)
+    # The synthesized ENT must be present as an explicit node.
+    assert dns.name.from_text("a.mf.test.") in zone.nodes
