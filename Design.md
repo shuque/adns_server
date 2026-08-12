@@ -1,0 +1,597 @@
+# adns_server — Architecture and Design
+
+This document describes the architecture of `adns_server`: the authoritative DNS
+server (`adns_server.py`), the offline DNSSEC zone signer (`signzone.py`), and
+the key generator (`adnskeygen.py`), all built currently on a shared zone/DNSSEC
+model (`dnssec_util.py`).
+
+It is both a descriptive reference for the code as it stands and a forward
+specification: §10 defines the target module architecture that a planned
+refactor will implement.
+
+Companion documents:
+- **DELEG.md** — serving-side DELEG semantics (type codes, DE-flag signaling,
+  DE=1/DE=0 referral and occlusion behavior, the DNSSEC proofs, the
+  Compact-Denial interaction). This document does not restate that material; §5
+  references it.
+- **README.md** — user-facing feature summary, installation, configuration, and
+  usage.
+
+---
+
+## 1. Overview and scope
+
+`adns_server` is a functional, authoritative DNS server written in Python.
+Its main purpose is prototyping and protocol-conformance experimentation —
+DELEG, Compact Denial of Existence, online signing, DNS cookies — not
+production serving or high throughput.
+
+The package comprises three programs over one shared library:
+
+| Program | Role |
+|---|---|
+| `adns_server.py` | The authoritative server: loads zones, answers queries, signs online. |
+| `signzone.py` | Offline DNSSEC signer: strip-and-re-sign a zone to a `.signed` file. |
+| `adnskeygen.py` | DNSSEC key generator: emits keytag-named PEM / DNSKEY / DS files. |
+| `dnssec_util.py` | Shared model: the `Zone` subclass, NSEC/NSEC3 helpers, `RRtype`. |
+
+**What the server does:** serves zones in master-file format; supports unsigned
+zones, pre-signed zones (NSEC and NSEC3), and online (dynamic) signing with a
+combined signing key. For online signing it offers three denial-of-existence
+styles — Compact Denial (RFC 9824), RFC 4470 minimally-covering NSEC ("white
+lies"), and traditional NSEC3 white lies.
+
+**DELEG support:** It also supports the DELEG protocol (in-progress work in the
+IETF). No special server or zone configuration is needed for this. If a served
+zone contains DELEG records, the server will automatically employ DELEG protocol
+compliant behavior for serving such delegations.
+
+**Not yet supported:** Features not supported today, but which might be
+implemented in the future, include Zone Transfer (AXFR/IXFR), Dynamic Update,
+persistent TCP connections, Secure Transport (DoT or DoQ), Post Quantum
+signature algorithms, etc.
+
+**Runtime shape:** one multi-threaded process with a `select()`-driven accept
+loop that dispatches each query to a short-lived worker thread, capped by a bounded
+semaphore. State is held in a `ServerContext` passed explicitly down the query
+path; the only process-wide singletons are the logging facility and the online
+signature cache.
+
+---
+
+## 2. Data model
+
+The data model is the foundation the rest of the system builds on, and it lives
+in `dnssec_util.py` so both the server and the offline signer share the same
+notion of what a zone is.
+
+### 2.1 The `Zone` subclass and its `SortedDict` backend
+
+`Zone(dns.zone.Zone)` overrides dnspython's node map with a `SortedDict`
+(`map_factory = SortedDict`) from the `sortedcontainers` package instead of the
+default `dict`. This allows the server to correctly and efficiently implement
+DNSSEC functions.
+
+DNSSEC authenticated denial is fundamentally about *ordering*: NSEC proves
+nonexistence by naming the canonically-adjacent owners that bracket a gap, and
+NSEC3 does the same over hashed owners. A plain hash map gives O(1) lookup but
+no notion of "the name just below X" or "the next name after Y." A sorted
+container gives both: `SortedDict.bisect_left` / `bisect_right` / `peekitem`
+locate the predecessor or successor of an arbitrary (even nonexistent) name in
+O(log n), which is exactly the primitive the covering-NSEC and covering-NSEC3
+searches need.
+
+Concretely, the sorted dictionary backend powers:
+- `nsec_covering(name)` — walk left from `bisect_left(name) - 1` to the nearest
+  owner that actually has an NSEC RRset.
+- `nsec3_covering(name)` — the same over hashed owner names (NSEC3 sorts by
+  hash, so the zone's sorted order *is* the NSEC3 chain order once owners are
+  hashed).
+- `covering_predecessor(name, ideal)` / `covering_successor(name)` — the RFC
+  4470 white-lie synthesis, which must find the real floor/ceiling around a
+  synthetic name to guarantee the synthesized owner neither collides with nor
+  spans a real name.
+
+`zone_from_file()` loads the zone with dnspython — whose reader honors the
+`Zone.map_factory`, so `zone.nodes` comes back as a `SortedDict` directly — then
+runs the ENT pass and computes the SOA minimum TTL. (A dnspython 2.0-era
+regression once remapped the node dict back to a plain `dict`, fixed well before
+our 2.7.0 floor; the invariant is guarded by
+`test_zone_nodes_use_map_factory` rather than a runtime re-wrap.)
+
+Names are stored **fully qualified, non-relativized** (`relativize=False`).
+Relativized names would break canonical ordering and the label surgery used
+throughout NSEC synthesis.
+
+Note that dnspython version 2.8 now supports a btree zone implementation
+("dns/btreezone.py provides another zone versioned implementation built on
+top of a B-tree. It maintains DNSSEC sort order, labels nodes as delegation
+points or glue, and can find the “bounds” of a name."). However, it needs
+Python 3.10, which exceeds our current required ceiling of Python 3.9, the
+version of Python that ships on popular platforms like RHEL 9 and Amazon
+Linux 2023.
+
+
+### 2.2 Empty non-terminals (ENT synthesis)
+
+An empty non-terminal is a name that owns no RRset but has descendants (e.g.
+`b.example.` when only `a.b.example.` exists) that do.
+
+`add_ent_nodes()` (called at load time by `zone_from_file()`) walks every owner
+up toward the apex and inserts an explicit empty `Node` into the `SortedDict`
+for each missing interior name. This makes ENTs first-class nodes so
+`get_node()` distinguishes "exists but empty" (NODATA) from "does not exist"
+(NXDOMAIN) with a single lookup, and so covering searches see the ENT in sorted
+order. (An alternative future design could forego this pre-population in favor
+of dynamically detecting ENT nodes at the cost of a few more runtime lookups
+into the Zone database.)
+
+ENTs interact with the two denial styles oppositely, and this asymmetry is a
+recurring subtlety (see §5 and the signer):
+- **NSEC:** ENTs get **no** NSEC record (RFC 4035 §2.3 — only names that owned
+  an RRset before signing get an NSEC). The signer's NSEC pass must therefore
+  positively select real-data / delegation owners and skip synthesized ENTs.
+- **NSEC3:** every ENT **does** get an NSEC3 (RFC 5155 §7.1). The signer's
+  NSEC3 pass hashes ENT nodes too.
+
+### 2.3 `HashableRRset`
+
+`dns.rrset.RRset` is not hashable, but the online signature cache needs RRsets
+as dictionary keys. `HashableRRset` wraps an RRset and derives a hash/equality
+key from the owner name, type, **and** a canonical order-independent
+representation of the RDATA (`frozenset` of each rdata's `to_digestable()`).
+
+Keying on RDATA — not just name+type — is essential: synthesized records
+(an NSEC with a computed next-name, or a minimal NSEC3) can share an owner name
+and type while carrying different RDATA across different responses. Keying on
+RDATA prevents the cache from returning a signature computed over one variant
+for a different one.
+
+### 2.4 `AUTH_IN_PARENT_RRTYPES` and `RRtype`
+
+`RRtype` is an `IntEnum` of the non-standard type codes the system uses:
+`NXNAME = 128` (Compact Denial), `DELEG = 61440`, `DELEGPARAM = 65433`.
+
+`AUTH_IN_PARENT_RRTYPES = [DS, DELEG]` is the set of types that are
+authoritative *in the parent* at a delegation cut. The server uses it to
+decide when a query at a cut is answered locally versus referred, and the signer
+uses it to decide which RRsets at a cut get signed (DS and DELEG yes; NS and
+glue no).
+
+### 2.5 `ZoneDict`
+
+`ZoneDict` maps zone origins to `Zone` objects and answers "which zone is
+authoritative for this qname?" via `find()`, which scans a reverse-sorted zone
+list so the longest (most specific) enclosing origin wins. It is a plain dict
+plus a cached sorted name list.
+
+---
+
+## 3. Zone and configuration mechanism
+
+### 3.1 Configuration sources and precedence
+
+Server configuration comes from three sources, in strict precedence order:
+**command line > config file > `Preferences` defaults.**
+
+- `Preferences` is a dataclass holding every tunable with its default value. It
+  is deliberately constructed with no argparse defaults for options that can
+  also be set in the config file, so an unsupplied CLI option stays `None` and
+  does not clobber a config-file value.
+- `init_config()` reads the YAML config, applying `config:` keys onto
+  `Preferences` and loading the `zones:` list.
+- `process_args()` parses the command line and overlays only the options that
+  were actually given.
+
+`ServerContext` bundles the resolved `Preferences`, the loaded `ZoneDict`, the
+DNS-cookie secret, and the socket dispatch table. It is passed explicitly into
+the query path rather than held globally, so the request machinery has no hidden
+dependencies (which also makes it directly unit-testable — see the test suite's
+`ctx` modality).
+
+The one intentional exception is logging: `log_message()` and its state are a
+process-wide singleton because logging must work before any context exists
+(early startup, argument parsing) and is global regardless of how many zones are
+served.
+
+### 3.2 Per-zone loading
+
+`make_single_zone()` builds each `Zone`:
+1. `zone_from_file()` parses the master file (fully-qualified, ENT-augmented,
+   SOA-min-TTL computed).
+2. If `dnssec: true`, `init_dnssec()` records the DNSSEC posture and captures
+   the apex NSEC3PARAM (enforcing a single-NSEC3PARAM rule); the presence or
+   absence of that record is the NSEC3-vs-NSEC switch, data-driven with no
+   separate flag.
+3. If `dynamic_signing: true`, the private key is loaded and `init_key()`
+   records it plus the signing DNSKEY and its keytag; `compact_denial` is read.
+4. `reject_wildcard_deleg()` enforces delext §4.4 (no Delegation Types at a
+   wildcard owner) at load time — the same invariant the signer enforces.
+5. Per-zone serving flags (`udp_truncate_all`, `require_server_cookie`) are
+   recorded.
+
+Relative zone/key paths are resolved against the working directory; a `-w` on
+the command line wins over the config `workdir` and keeps winning across SIGHUP
+re-reads (`workdir_cli`).
+
+### 3.3 Reload and Termination
+
+SIGHUP re-runs `init_config()` and clears the online signature cache, so zone
+edits and config changes take effect without a restart. Zone *files* are the
+source of truth; the server never writes them back.
+
+SIGTERM cleanly terminates the server, and in background mode, deletes the
+pid file.
+
+---
+
+## 4. Query-processing pipeline
+
+A query's life, from wire to wire:
+
+1. **Ingress** (`handle_connection_udp` / `handle_connection_tcp`) reads the
+   datagram or the length-prefixed TCP message and constructs a `DNSquery`,
+   which parses the wire message, extracts qname/qtype/qclass, and logs it. TCP
+   reads are governed by a whole-transaction deadline (§7).
+2. **`DNSresponse.__init__`** builds the response skeleton via
+   `make_response()`, canonicalizes (downcases) the qname for internal
+   processing — critical so synthesized owner names and NSEC next-names stay in
+   canonical case and online signatures match regardless of 0x20 case
+   randomization — clears AA, and calls `prepare_response()`.
+3. **`prepare_response()`** is the top-level dispatcher: it handles opcode
+   (NOTIFY/UPDATE/non-QUERY early-outs), EDNS negotiation (`do_edns_init`,
+   version check, cookie processing), the BADCOOKIE and header-only paths, the
+   QCLASS and meta-type checks, then calls `find_answer()`. Finally it emits the
+   EDNS OPT RR (`do_edns_final`) and sets AA on authoritative NOERROR/NXDOMAIN
+   answers.
+4. **`find_answer()`** selects the zone from the `ZoneDict` (REFUSED with an EDE
+   if none), then applies pre-serving gates: force-truncate zones, and the
+   require-server-cookie gate. Otherwise it calls `find_answer_in_zone()`.
+5. **`find_answer_in_zone()` / `process_name()`** is the descent down the DNS
+   tree from apex toward the qname, one label at a time. At each interior name
+   `process_name()` checks, in order: does the node exist (else wildcard or
+   NXDOMAIN); is there a DNAME (redirect); is there a delegation cut (NS and/or
+   DELEG → referral or occlusion, per DE flag — see §5 and DELEG.md). When the
+   search name reaches the qname, `find_rrtype()` produces the answer.
+   This roughly follows the algorithm specified in RFC 1034, Section 4.3.2,
+   enhanced to incorporate DNAME and DELEG processing.
+6. **`find_rrtype()`** resolves the terminal outcome: ANY handling, CNAME
+   chasing, the exact-type answer, or NODATA (which triggers the denial machinery
+   in §5).
+7. **Egress** (`to_wire`) serializes with the computed max size, truncating
+   (TC=1) if the response overflows the UDP budget.
+
+CNAME and DNAME chains are followed within `find_answer` with loop detection
+(owner lists → SERVFAIL on a loop). The descent returns a boolean "finished"
+signal so the caller knows whether to append the next label or stop.
+
+---
+
+## 5. DNSSEC
+
+This section covers the server's online (dynamic) DNSSEC: on-demand signing, the
+denial-of-existence matrix, and DELEG signing. The offline signer and key
+generator are described separately in §8 and §9. The serving-side DELEG
+*semantics* (DE=1/DE=0 referral and occlusion, the Compact-Denial interaction)
+live in **DELEG.md**.
+
+### 5.1 Online signing and the signature cache
+
+When a zone has `dynamic_signing: true`, RRsets are signed on demand as
+responses are built. `sign_rrset(zone, h_rrset)` wraps `dns.dnssec.sign` with
+inception/expiration derived from the current time (`RRSIG_INCEPTION_OFFSET`,
+`RRSIG_LIFETIME`) and returns an RRSIG RRset.
+
+It is wrapped in a `cachetools.TTLCache` (keyed by zone + `HashableRRset`, §2.3)
+because the same RRset is frequently re-signed across queries, and public-key
+signing is the server's dominant cost. The cache TTL is set below the signature
+lifetime so cached signatures never approach expiry. SIGHUP clears the cache.
+
+`add_rrset()` is the choke point through which every RRset reaches a response
+section: it dedups, then — for DO queries — either signs online, fetches a
+precomputed RRSIG from a pre-signed zone, or does nothing (unsigned). It also
+handles the RFC 2308 / RFC 4034 §3 TTL subtlety for SOA-in-negative-responses
+(lower the wire TTL to the SOA minimum without disturbing the RRSIG Original
+TTL).
+
+### 5.2 The denial-of-existence matrix
+
+Denial of existence is the most intricate part of the response machinery, because
+the server supports several styles and each has an NSEC and an NSEC3 form, times
+NXDOMAIN vs NODATA, times online vs pre-signed. The dispatch is centralized in
+`nxdomain()` and `nodata()`, which branch on `online_signing()`, `nsec3param`,
+and `compact_denial`:
+
+| Style | NXDOMAIN | NODATA |
+|---|---|---|
+| Online NSEC, white lies (RFC 4470) | `nxdomain_nsec_online` — covering NSEC around the next-closer + wildcard | `nodata_nsec_online` — matching NSEC |
+| Online NSEC, Compact Denial | `nxdomain_nsec_online_compact` — NXNAME black lie | `nodata_nsec_online` |
+| Online NSEC3, white lies | `nxdomain_nsec3_online` — closest-encloser proof | `nodata_nsec3_online` |
+| Online NSEC3, Compact Denial | `nxdomain_nsec3_online_compact` — NXNAME black lie | `nodata_nsec3_online_compact` |
+| Pre-signed NSEC | `nxdomain_nsec` | `nodata_nsec` |
+| Pre-signed NSEC3 | `nxdomain_nsec3` | `nodata_nsec3` |
+
+The two **online white-lie** constructions — `nxdomain_nsec_online` (RFC 4470)
+and `nxdomain_nsec3_online` — are the subtlest code in this area. Both
+synthesize *minimal* covering records on the fly whose intervals must
+reconstruct the correct closest encloser / next-closer for a strict validator,
+without colliding with or spanning a real name. The NSEC form synthesizes two
+NSECs (one covering the queried name, one covering the relevant wildcard) with
+owner/next names built around the *next-closer* name rather than the full qname;
+the `successor_name` / `covering_predecessor` / `covering_successor` helpers
+(`dnssec_util.py`) implement the interval endpoints and collision-avoidance
+rules, documented at length in their docstrings and in the `rfc4470-white-lies`
+design note. The NSEC3 form is arguably more involved: it assembles the full
+closest-encloser proof from three minimal NSEC3 records — closest-encloser
+match, next-closer cover, and wildcard cover — each over hashed owner names.
+
+**Compact Denial** (RFC 9824) replaces a conventional NXDOMAIN response with a
+NODATA response that contains a single NXNAME-bearing "black lie" NSEC/NSEC3 at
+the queried name, and sets NXDOMAIN in the RCODE only when the client signaled
+Compact-Answers-OK.
+The DELEG-occlusion path deliberately does **not** downgrade to a black lie even
+in Compact-Denial zones — see DELEG.md for that rationale (keeping the DELEG bit
+visible for downgrade detection).
+
+### 5.3 DELEG signing (online)
+
+For online-signed zones the DELEG record at a cut is recognized, placed in the
+referral, and signed dynamically like any authoritative RRset, because
+`AUTH_IN_PARENT_RRTYPES` classifies it as authoritative-in-parent (§2.4). The
+delegation-point NSEC/NSEC3 bitmap includes the DELEG bit because it is built
+from the node's actual present types. `add_nsec_online()`'s special
+covering-next-name form (`owner` → `owner\000`) is triggered by NS **or** DELEG
+at the cut, so a DELEG-only cut gets the same covering NSEC a classic NS
+delegation would.
+
+---
+
+## 6. Network and runtime
+
+### 6.1 Sockets and the event loop
+
+`setup_sockets()` opens UDP and TCP listeners for the configured address
+family/families and returns a dispatch dict keyed by `fileno` →
+`(sock, handler, is_tcp)`. Keying on fileno lets `select()` consume the dict's
+keys as its read list and lets the loop look up a ready descriptor directly.
+
+`run_event_loop()` is a classic `select()` accept loop: wait for readable
+descriptors, and for each, acquire a worker slot and dispatch. It is
+single-threaded at the accept layer; concurrency comes from handing each query
+to a worker thread.
+
+### 6.2 Worker threads
+
+Each accepted query runs in its own thread (`spawn_worker`), created as a
+**daemon thread** so a worker still blocked at shutdown (e.g. a TCP thread in
+`recv()` on a stalled client) does not delay interpreter exit — non-daemon
+threads would be joined by `threading._shutdown()`, making SIGTERM hang and
+defeating the atexit pidfile cleanup. The worker wrapper releases its semaphore
+slot in a `finally` so the slot returns however the handler exits.
+
+### 6.3 Daemonization, privileges, signals
+
+- `daemon()` does the double-fork/setsid dance, writes the pidfile (registering
+  an atexit remover), closes inherited descriptors via a bounded helper
+  (`close_range` where available), and reopens 0/1/2 to `/dev/null`.
+- `drop_privs()` drops to a configured uid/gid when started as root.
+- Signal handlers: SIGTERM exits cleanly (letting atexit run); SIGHUP re-reads
+  config/zones and clears the signature cache. `handle_sighup` closes over the
+  context to reach `prefs`/`zonedict`, since `signal.signal` handlers take a
+  fixed `(signum, frame)` signature.
+
+---
+
+## 7. Resource limiting and hardening
+
+These mechanisms bound local resource consumption under load. They are not, and
+are not intended to be, defenses against spoofed-source or amplification
+attacks — that is out of scope for a prototype (`run_event_loop`'s docstring
+states this explicitly).
+
+- **Concurrency cap.** A `BoundedSemaphore(max_workers)` (default 256) caps
+  concurrent worker threads. When the cap is hit the loop *sheds* the event
+  rather than blocking the accept loop: for UDP it reads and drops the datagram;
+  for TCP it accepts and immediately closes. Both consume the readable event so
+  `select()` does not re-fire on the same fd and spin.
+- **Slow-client protection.** TCP reads use a whole-transaction deadline
+  (`tcp_timeout`, default 5s, RFC 7766 §8): the socket timeout is reset to the
+  remaining budget before each `recv()`, so a client that dribbles bytes cannot
+  reset the clock and hold a worker indefinitely. On timeout the connection is
+  dropped (no SERVFAIL to a peer that is not reading).
+- **DNS cookies** (RFC 7873, SipHash-2-4). The server computes a server cookie
+  over the client cookie, client IP, and a timestamp under a per-process secret,
+  with drift and recalculation windows. Zones may set `require_server_cookie` to
+  gate answers on a verified cookie (BADCOOKIE otherwise), mitigating
+  off-path spoofing and amplification for cookie-capable clients. There is no
+  capability yet however to require cookies selectively (e.g. under conditions
+  of duress).
+- **Rate-limited logging.** `RateLimitedLog` emits at most one message per
+  interval with a suppressed-since count, so events that recur at
+  attacker-controlled rates (request shedding under the worker cap) cannot turn
+  the log itself into an amplification/DoS vector.
+- **Response size / truncation.** `max_size()` computes the UDP budget from the
+  EDNS payload negotiation; `truncate()` sets TC and empties sections when a
+  response overflows. Zones may force truncation (`udp_truncate_all`) to test
+  TCP fallback.
+
+---
+
+## 8. The offline signer (`signzone.py`)
+
+The offline signer produces a conventional pre-signed zone (`.signed`) that the
+server — or any RFC 4035/5155 authoritative server — can serve. It exists so
+DELEG zones can be served pre-signed, which current third-party signers mostly
+can't do (they treat DELEG as non-authoritative glue and neither sign it nor set
+its bitmap bit). It shares the entire zone/DNSSEC model with the server via
+`dnssec_util.py`, so its output matches the server's serving semantics by
+construction.
+
+**CLI and I/O contract.** `signzone.py [options] <zonename> <zonefile>`; zone
+name is explicit (no `$ORIGIN` guessing). Output is `<zonefile>.signed` by
+default (`-o -` for stdout), written to a temp file and atomically renamed on
+success so a failed run leaves no partial output and never overwrites the input.
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `-K, --keydir DIR` | directory of keytag-named PEM private keys | `.` |
+| `-o, --output FILE` | output file (`-` = stdout) | `<zonefile>.signed` |
+| `-e, --expiration T` | RRSIG expiration | `+30d` |
+| `-i, --inception T` | RRSIG inception | `-1h` |
+| `-j, --jitter N` | ± window applied per-RRSIG to expiration | `6h` |
+| `--bump` | increment SOA serial (in-memory only) | off |
+| `-v, --verbose` | per-RRset signing trace | off |
+
+Time syntax accepts bare seconds, `s/m/h/d/w/y` suffixes, signed relative forms
+(`+30d`, `-1h`), and a 14-digit absolute `YYYYMMDDHHMMSS` (BIND-compatible).
+
+**Key discovery.** DNSKEYs come from the zonefile. For each, the signer computes
+the keytag and loads `<keydir>/<zone>+<alg>+<keytag>.pem` by **exact** filename
+(not a `*.pem` glob), so differently-suffixed PEM files (e.g. `.prepublish.pem`)
+are deliberately ignored. A DNSKEY with no matching PEM is **publish-only** (kept
+in the RRset, not used to sign); no PEM for *any* DNSKEY is a hard error. This
+publish-only rule enables key rollover.
+
+**Key classification and roles** (SEP bit, `dns.rdtypes.dnskeybase.SEP`):
+- **CSK** (single SEP key, no separate ZSK) signs everything.
+- **KSK + ZSK:** the KSK signs only the DNSKEY RRset; the ZSK signs everything
+  else.
+- Invariant: sign the DNSKEY RRset with every SEP key that has a PEM; sign
+  everything else with every non-SEP key that has a PEM (a CSK counts as both).
+
+This makes multi-key rollover possible: two ZSKs where one is publish-only
+is a pre-publish ZSK roll; two KSKs both with PEMs is a double-signature KSK
+roll.
+
+**Signing pipeline.** Strip all existing RRSIG/NSEC/NSEC3 (retain DNSKEY and
+NSEC3PARAM); resolve one absolute RRSIG window (shared inception, per-RRSIG
+jitter on expiration); walk the zone in sorted canonical order signing each
+authoritative RRset — at a cut only DS and DELEG are signed, never NS or glue;
+then build the denial chain. NSEC mode links each real-data/delegation owner's
+NSEC to the next in canonical order (ENTs excluded, §2.2); NSEC3 mode
+(data-driven from apex NSEC3PARAM) hashes every owner **including ENTs**, sorts
+by hash, and links the hash-ordered chain. The signing RRSIG helper is a plain,
+un-cached function in `signzone.py` (distinct from the server's cached
+`sign_rrset`).
+
+**DELEG in the signer** reduces to: the cut predicate recognizes
+`RRtype.DELEG`, and the authoritative-at-a-cut set is `AUTH_IN_PARENT_RRTYPES`.
+Everything else is the generic engine. DELEG and DELEGPARAM are handled as RFC
+3597 generic rdata; dnspython loads, digests, and builds NSEC/NSEC3 bitmaps for
+the numeric types without registration. `reject_wildcard_deleg()` runs first
+and fails the run (nonzero, no output) on a wildcard-DELEG violation. The
+DNSKEY-ADT bit needs no signer code: `adnskeygen.py -f 259` generates such a
+key and the signer treats it generically.
+
+**Operator workflows.** (i) *Unsigned zone as source of truth* (recommended):
+edit the small unsigned file, regenerate `.signed` on each change; `--bump` is a
+convenience (source-relative, so for durable monotonic serials advance the
+source serial). (ii) *Re-feed the signed zone*: feeding a `.signed` file back in
+strips and re-signs — the right tool for rollover / expiry refresh, the wrong
+tool for editing contents.
+
+**Non-goals** (explicit): NSEC3 opt-out; online/dynamic black-lie generation
+(CDOE is an online technique); incremental/partial re-signing; serial policy
+beyond `--bump`; key generation (that is `adnskeygen.py`).
+
+**Deferred:** Multi-algorithm zone support will be implemented in the future.
+The plan will be to deliberately *not* enforce the strict RFC 4035 §2.2 "one
+signature per algorithm per RRset" rule, aligning instead with the relaxation
+in draft-huque-dnsop-multi-alg-rules.
+
+---
+
+## 9. Key generation (`adnskeygen.py`)
+
+`adnskeygen.py` generates an ECDSA P-256 (alg 13) or Ed25519 (alg 15) key and
+prints the private PEM, the DNSKEY RDATA/keytag, and the DNSKEY RRset. With
+`-K DIR` it writes the keytag-named triple the signer consumes:
+`<zone>+<alg>+<keytag>.{pem,dnskey}`, plus `.ds` **only for SEP keys** (KSK/CSK)
+— a plain ZSK gets no DS, matching common operator practice. `--prepublish`
+writes the private key as `.prepublish.pem` so the DNSKEY can be pre-published
+while the signer ignores it until it is activated by renaming to `.pem`.
+
+---
+
+## 10. Target module re-architecture
+
+**Status: forward specification.** `adns_server.py` is currently a single
+~2000-line module. Review.md §1.1 flagged the monolith; the shared-model
+extraction into `dnssec_util.py` was its first step. This section defines the
+end state and is the spec the refactor implements.
+
+### 10.1 Packaging
+
+Move from `script-files` (which copies scripts verbatim into `bin/`, off
+`sys.path`) plus a single `py-modules` entry to a proper importable package with
+console-script entrypoints:
+
+```toml
+[project.scripts]
+adns-server = "adns.__main__:main"
+signzone = "adns.signer:main"
+adnskeygen = "adns.keygen:main"
+```
+
+Deployment stays `pip install` into a venv (as guvnor already does); the
+single-file convenience is dropped. The console scripts are thin `main()`
+wrappers over the package.
+
+### 10.2 Module layout (`adns/` package)
+
+| Module | Responsibility | Grows from |
+|---|---|---|
+| `adns/__init__.py` | `__version__`, package exports | `__version__` |
+| `adns/config.py` | YAML parse, `Preferences`, `ServerContext`, per-zone config, CLI args | config/args functions |
+| `adns/zone.py` | `Zone`, `ZoneDict`, ENT synthesis, NSEC/NSEC3 name+hash helpers, `HashableRRset`, `RRtype`, `AUTH_IN_PARENT_RRTYPES` | `dnssec_util.py` + `ZoneDict`/`HashableRRset` |
+| `adns/crypto.py` | online `sign_rrset` + signature cache, key loading, minimal-NSEC3 builder | signing helpers |
+| `adns/response.py` | `DNSquery`, `DNSresponse` core, and the mixins it composes | the `DNSresponse` class |
+| `adns/server.py` | sockets, event loop, worker pool, daemon/privdrop/pidfile, signals, logging | runtime functions |
+| `adns/__main__.py` | `main()` entrypoint glue | `__main__` block |
+
+`dnssec_util.py`'s content lands in `adns/zone.py` (or is re-exported from there)
+so the signer and server share one module; the standalone `dnssec_util.py` can
+be retired once both import from the package.
+
+### 10.3 Decomposing `DNSresponse` with mixins
+
+`DNSresponse` is the dominant mass (~45 methods, ~970 lines) and its methods
+form one cohesive request-handling algorithm that communicates entirely through
+shared `self.` state (`self.response`, `self.query`, `self.qname`,
+`self.edns_options`, …). The goal of splitting it is **testability and
+navigation, not decoupling** — the methods are legitimately entangled through
+that shared state, so a decomposition that pretended otherwise (free functions,
+collaborator objects) would fight the code.
+
+Mixins fit exactly this shape: multiple inheritance composes grouped method sets
+onto one object, `self` stays shared across all of them, and the move is close
+to cut-and-paste. The class becomes:
+
+```python
+class DNSresponse(DenialMixin, ReferralMixin, ResolveMixin, EdnsCookieMixin):
+    # Core plumbing stays on the class itself:
+    #   __init__, to_wire, max_size, truncate, add_rrset, add_soa,
+    #   prepare_response, dnssec_ok, need_edns
+```
+
+| Mixin | Methods (clusters) |
+|---|---|
+| `DenialMixin` | `nxdomain*`, `nodata*`, `add_nsec_matching`, `add_nsec_online`, `wildcard_no_closer_match` — the §5.2 denial matrix (largest cluster) |
+| `ReferralMixin` | `do_referral*`, `get_glue`, `occluded_nxdomain*`, `next_closer_name`, `add_new_delegation_only_ede` — referral + DELEG occlusion |
+| `ResolveMixin` | `find_answer`, `find_answer_in_zone`, `process_name`, `find_rrtype`, `process_cname`, `process_dname`, `process_any_metatype` — the name-resolution walk |
+| `EdnsCookieMixin` | `do_edns_init`, `do_edns_final`, `add_cookie_option`, `process_cookie`, `verify_server_cookie`, `calculate_server_cookie` — EDNS + cookies |
+
+Each mixin's docstring names the `self.` attributes and sibling methods it
+relies on — the written contract that compensates for the implicit dependencies
+inherent to mixins. If a cluster later proves genuinely separable in state (a
+candidate: denial-of-existence), it can graduate to a collaborator object; the
+mixin split does not preclude that.
+
+### 10.4 What does not change
+
+Wire behavior, config format, CLI surface, and the test suite's black-box
+assertions must be identical across the split — it is a pure internal
+reorganization (a patch-level change on the semver surface, though the packaging
+change to console scripts is a minor bump). The direct-import (`ctx`) test
+modality's import paths change to the new module locations; the black-box
+modality is unaffected.

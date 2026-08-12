@@ -5,6 +5,8 @@ It serves DNS zones in master file format. I mainly use it for functional
 testing and prototyping new protocol features. It is not intended for
 production use or high performance applications.
 
+For a detailed technical design document, see **[Design.md](Design.md)**.
+
 ## DNSSEC Support
 
 The server implements the DNSSEC protocol extensions. It can serve
