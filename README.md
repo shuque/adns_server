@@ -148,10 +148,11 @@ zones:
     private_key: "/path/to/privatekey.pem"
 ```
 
-### Key Generation for Online Signing
+### Key Generation for DNSSEC Signing
 
 This repo also includes a small script, adnskeygen.py, to help generate
-DNSSEC keys used for online signing configurations.
+DNSSEC keys, used for both online signing configurations and offline
+signing with the signzone.py tool.
 
 ```
 $ ./adnskeygen.py -h
