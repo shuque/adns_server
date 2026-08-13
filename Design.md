@@ -9,9 +9,9 @@ still describe file paths in the pre-split single-file form (`adns_server.py`,
 `signzone.py`, `adnskeygen.py`, `dnssec_util.py`) are historical and superseded
 by §10.
 
-It is both a descriptive reference for the code as it stands and a forward
-specification: §10 defines the target module architecture that a planned
-refactor will implement.
+It is a descriptive reference for the code as it stands. §10 documents the
+`adns/` package architecture and records, task by task, how the earlier
+single-file layout was split into it.
 
 Companion documents:
 - **DELEG.md** — serving-side DELEG semantics (type codes, DE-flag signaling,
@@ -157,8 +157,17 @@ for a different one.
 
 ### 2.4 `AUTH_IN_PARENT_RRTYPES` and `RRtype`
 
-`RRtype` is an `IntEnum` of the non-standard type codes the system uses:
-`NXNAME = 128` (Compact Denial), `DELEG = 61440`, `DELEGPARAM = 65433`.
+`RRtype` is an `IntEnum` of type codes the system uses that are not (yet)
+available as named constants in dnspython: `NXNAME = 128` (Compact Denial),
+`DELEG = 61440`, `DELEGPARAM = 65433`. These fall into two distinct categories:
+
+- `NXNAME` **is standardized** — it is defined by RFC 9824 (Compact Denial of
+  Existence). It appears here only because the installed dnspython release does
+  not yet recognize it; once dnspython catches up this entry becomes redundant.
+- `DELEG` and `DELEGPARAM` are **not yet standardized**. Their code points are
+  pre-standardization placeholders agreed with collaborators
+  (`DELEG = 0xF000`, in the proposed delegation-TYPE range; `DELEGPARAM =
+  65433`) and will change if/when IANA assigns them.
 
 `AUTH_IN_PARENT_RRTYPES = [DS, DELEG]` is the set of types that are
 authoritative *in the parent* at a delegation cut. The server uses it to
@@ -525,18 +534,22 @@ pre-published while the signer ignores it until it is activated by renaming to
 
 ---
 
-## 10. Target module re-architecture
+## 10. Module architecture (`adns/` package)
 
-**Status: forward specification.** `adns_server.py` is currently a single
-~2000-line module. Review.md §1.1 flagged the monolith; the shared-model
-extraction into `dnssec_util.py` was its first step. This section defines the
-end state and is the spec the refactor implements.
+**Status: implemented (0.12.0).** The system was originally a single
+~2000-line `adns_server.py` module (plus the standalone `signzone.py`,
+`adnskeygen.py`, and the shared `dnssec_util.py`). Review.md §1.1 flagged the
+monolith; the shared-model extraction into `dnssec_util.py` was its first step,
+and the full split into the `adns/` package followed. This section describes
+the resulting architecture and records how the split was carried out, task by
+task — the per-task "**Status:** …" notes below are that history, not pending
+work.
 
 ### 10.1 Packaging
 
-Move from `script-files` (which copies scripts verbatim into `bin/`, off
-`sys.path`) plus a single `py-modules` entry to a proper importable package with
-console-script entrypoints:
+Packaging moved from `script-files` (which copied scripts verbatim into `bin/`,
+off `sys.path`) plus a single `py-modules` entry to a proper importable package
+with console-script entrypoints:
 
 ```toml
 [project.scripts]
@@ -546,7 +559,7 @@ adnskeygen = "adns.keygen:main"
 ```
 
 Deployment stays `pip install` into a venv (as guvnor already does); the
-single-file convenience is dropped. The console scripts are thin `main()`
+single-file convenience was dropped. The console scripts are thin `main()`
 wrappers over the package.
 
 **Status: Task 8 done.** `adns/__main__.py` is now the real entrypoint
@@ -688,14 +701,14 @@ comes solely from `adns.__version__` (`0.12.0`).
 `DNSresponse` is the dominant mass (~45 methods, ~970 lines) and its methods
 form one cohesive request-handling algorithm that communicates entirely through
 shared `self.` state (`self.response`, `self.query`, `self.qname`,
-`self.edns_options`, …). The goal of splitting it is **testability and
+`self.edns_options`, …). The goal of the split was **testability and
 navigation, not decoupling** — the methods are legitimately entangled through
 that shared state, so a decomposition that pretended otherwise (free functions,
-collaborator objects) would fight the code.
+collaborator objects) would have fought the code.
 
 Mixins fit exactly this shape: multiple inheritance composes grouped method sets
-onto one object, `self` stays shared across all of them, and the move is close
-to cut-and-paste. The class becomes:
+onto one object, `self` stays shared across all of them, and the move was close
+to cut-and-paste. The class is:
 
 ```python
 class DNSresponse(DenialMixin, ReferralMixin, ResolveMixin, EdnsCookieMixin):
@@ -729,11 +742,11 @@ cookie/message-size constants they and the moved methods depend on
 `RRtype`/`AUTH_IN_PARENT_RRTYPES`, kept as a compatibility re-export for the
 same reason as the `adns.zone` symbols in the paragraph above).
 
-### 10.4 What does not change
+### 10.4 What did not change
 
-Wire behavior, config format, and the test suite's black-box assertions must be
-identical across the split — it is a pure internal reorganization by itself.
-The direct-import (`ctx`) test modality's import paths change to `adns.*` (e.g.
+Wire behavior, config format, and the test suite's black-box assertions are
+identical across the split — it was a pure internal reorganization by itself.
+The direct-import (`ctx`) test modality's import paths changed to `adns.*` (e.g.
 `adns.response.DNSresponse`, `adns.zone.Zone`), in lockstep with each
 extraction task; the black-box modality (subprocess + real DNS queries) is
 unaffected in what it asserts, though its launch *mechanism* changed in Task 8
