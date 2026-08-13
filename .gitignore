@@ -10,6 +10,7 @@ __pycache__
 adns_server.egg-info/
 build/
 scratch/
+docs/superpowers/
 tests/*
 !tests/pytest/
 tests/pytest/.server.log
