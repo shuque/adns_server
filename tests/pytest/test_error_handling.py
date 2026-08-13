@@ -4,9 +4,9 @@ are logged (with traceback) and answered with a best-effort SERVFAIL rather
 than silently dropped, and TCP sockets are always closed.
 
 Unlike the rest of the suite (which drives a live subprocess server over the
-wire), these tests import adns_server directly and inject faults with fake
-sockets and monkeypatching -- the response path has to be made to raise, which
-can't be provoked from a normal client query.
+wire), these tests import adns.* directly and inject faults with fake sockets
+and monkeypatching -- the response path has to be made to raise, which can't
+be provoked from a normal client query.
 """
 
 # The ctx fixture is defined and consumed in this module; a test taking it as
@@ -26,15 +26,17 @@ import dns.rdatatype
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__),
                                                  "..", "..")))
-import adns_server as adns   # noqa: E402
+from adns.config import Preferences, ServerContext   # noqa: E402
+from adns.zone import ZoneDict   # noqa: E402
+from adns.response import DNSquery   # noqa: E402
+import adns.server as adns_server_module   # noqa: E402
 
 
 @pytest.fixture
 def ctx():
     """A minimal ServerContext for the handlers under test (no zones needed;
     these tests fault the response path before zone lookup)."""
-    return adns.ServerContext(prefs=adns.Preferences(),
-                              zonedict=adns.ZoneDict())
+    return ServerContext(prefs=Preferences(), zonedict=ZoneDict())
 
 
 # --------------------------------------------------------------------------
@@ -105,8 +107,8 @@ def _boom(*_args, **_kwargs):
 
 def test_send_servfail_udp():
     sock = FakeUDPSocket()
-    query = adns.DNSquery(_query_wire(), cliaddr="192.0.2.1", cliport=12345)
-    adns.send_servfail(query, sock)
+    query = DNSquery(_query_wire(), cliaddr="192.0.2.1", cliport=12345)
+    adns_server_module.send_servfail(query, sock)
     assert len(sock.sent) == 1
     data, addr = sock.sent[0]
     resp = dns.message.from_wire(data)
@@ -117,9 +119,9 @@ def test_send_servfail_udp():
 def test_send_servfail_tcp():
     sock = FakeTCPSocket()
     wire = _query_wire()
-    query = adns.DNSquery(_tcp_frame(wire), cliaddr="192.0.2.1",
-                          cliport=12345, tcp=True)
-    adns.send_servfail(query, sock)
+    query = DNSquery(_tcp_frame(wire), cliaddr="192.0.2.1",
+                     cliport=12345, tcp=True)
+    adns_server_module.send_servfail(query, sock)
     # Reply is length-prefixed.
     msg_len, = struct.unpack("!H", bytes(sock.sent[:2]))
     resp = dns.message.from_wire(bytes(sock.sent[2:2 + msg_len]))
@@ -128,17 +130,17 @@ def test_send_servfail_tcp():
 
 def test_send_servfail_noop_when_query_none():
     sock = FakeUDPSocket()
-    adns.send_servfail(None, sock)
+    adns_server_module.send_servfail(None, sock)
     assert not sock.sent
 
 
 def test_send_servfail_noop_when_unparsed():
     """A query whose message never parsed has nothing to respond to."""
     sock = FakeUDPSocket()
-    query = adns.DNSquery(b"\x00\x01\x02garbage", cliaddr="192.0.2.1",
-                          cliport=12345)
+    query = DNSquery(b"\x00\x01\x02garbage", cliaddr="192.0.2.1",
+                    cliport=12345)
     assert query.message is None      # confirm the precondition
-    adns.send_servfail(query, sock)
+    adns_server_module.send_servfail(query, sock)
     assert not sock.sent
 
 
@@ -147,10 +149,12 @@ def test_send_servfail_noop_when_unparsed():
 # --------------------------------------------------------------------------
 
 def test_udp_handler_exception_sends_servfail(monkeypatch, capsys, ctx):
-    monkeypatch.setattr(adns, "handle_query", _boom)
+    # handle_query is called from within adns.server's handle_connection_udp,
+    # so the name to patch is adns.server's own module global.
+    monkeypatch.setattr(adns_server_module, "handle_query", _boom)
     sock = FakeUDPSocket(recv_data=_query_wire())
     # Must not raise out of the thread body.
-    adns.handle_connection_udp(sock, ctx)
+    adns_server_module.handle_connection_udp(sock, ctx)
     assert len(sock.sent) == 1
     resp = dns.message.from_wire(sock.sent[0][0])
     assert resp.rcode() == dns.rcode.SERVFAIL
@@ -162,9 +166,9 @@ def test_udp_handler_exception_sends_servfail(monkeypatch, capsys, ctx):
 
 def test_tcp_handler_exception_sends_servfail_and_closes(monkeypatch, capsys,
                                                          ctx):
-    monkeypatch.setattr(adns, "handle_query", _boom)
+    monkeypatch.setattr(adns_server_module, "handle_query", _boom)
     sock = FakeTCPSocket(recv_data=_tcp_frame(_query_wire()))
-    adns.handle_connection_tcp(sock, ("192.0.2.1", 12345), ctx)
+    adns_server_module.handle_connection_tcp(sock, ("192.0.2.1", 12345), ctx)
     # SERVFAIL sent.
     msg_len, = struct.unpack("!H", bytes(sock.sent[:2]))
     resp = dns.message.from_wire(bytes(sock.sent[2:2 + msg_len]))
@@ -178,15 +182,15 @@ def test_tcp_handler_exception_sends_servfail_and_closes(monkeypatch, capsys,
 
 def test_tcp_socket_closed_on_normal_path(monkeypatch, ctx):
     """The finally clause closes the socket on the success path too."""
-    monkeypatch.setattr(adns, "handle_query", lambda *a, **k: None)
+    monkeypatch.setattr(adns_server_module, "handle_query", lambda *a, **k: None)
     sock = FakeTCPSocket(recv_data=_tcp_frame(_query_wire()))
-    adns.handle_connection_tcp(sock, ("192.0.2.1", 12345), ctx)
+    adns_server_module.handle_connection_tcp(sock, ("192.0.2.1", 12345), ctx)
     assert sock.closed
 
 
 def test_tcp_socket_closed_on_empty_read(ctx):
     """A peer that closes before sending is handled and the fd is released."""
     sock = FakeTCPSocket(recv_data=b"")   # recv() returns b'' immediately
-    adns.handle_connection_tcp(sock, ("192.0.2.1", 12345), ctx)
+    adns_server_module.handle_connection_tcp(sock, ("192.0.2.1", 12345), ctx)
     assert sock.closed
     assert not sock.sent

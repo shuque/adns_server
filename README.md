@@ -61,7 +61,7 @@ program recognizes the DELEG record, places it in the referral for the
 corresponding delegation, and generates the signature dynamically.
 
 For offline signing, the package includes a DELEG-aware zone signer,
-`signzone.py`, which signs the DELEG RRset at the cut and sets the DELEG bit in
+`signzone` (`adns/signer.py`), which signs the DELEG RRset at the cut and sets the DELEG bit in
 the delegation-point NSEC/NSEC3 bitmap, so the program can serve pre-signed
 zones with DELEG. See the offline-signer section of **[Design.md](Design.md)**
 (§8).
@@ -96,16 +96,16 @@ pip3 install git+https://github.com/shuque/adns_server.git
 ```
 
 To install a specific released version, append the tag, e.g.
-`...adns_server.git@v0.11.1`.
+`...adns_server.git@v0.12.0`.
 
 ### Usage
 
 ```
-$ adns_server.py -h
-usage: adns_server.py [-h] [--version] [-c FILE] [-w DIR] [-d] [-p N]
-                      [-s ADDR] [-u USER] [-g GROUP] [-4 | -6] [-f] [-e N]
+$ adns-server -h
+usage: adns-server [-h] [--version] [-c FILE] [-w DIR] [-d] [-p N]
+                   [-s ADDR] [-u USER] [-g GROUP] [-4 | -6] [-f] [-e N]
 
-adns_server.py version X.Y.Z - An authoritative DNS server
+adns-server version X.Y.Z - An authoritative DNS server
 
 options:
   -h, --help  show this help message and exit
@@ -159,29 +159,33 @@ zones:
 
 ### Key Generation for DNSSEC Signing
 
-This repo also includes a small script, adnskeygen.py, to help generate
-DNSSEC keys, used for both online signing configurations and offline
-signing with the signzone.py tool.
+This package also includes a small console script, `adnskeygen` (`adns/keygen.py`,
+also runnable as `python3 -m adns.keygen`), to help generate DNSSEC keys, used
+for both online signing configurations and offline signing with the `signzone`
+tool.
 
 ```
-$ ./adnskeygen.py -h
-usage: adnskeygen.py [-h] [-a N] [-f N] [-K DIR] zone
+$ adnskeygen -h
+usage: adnskeygen [-h] [-a N] [-f N] [-K DIR] [--prepublish] zone
 
 positional arguments:
-  zone        DNS zone name
+  zone                  DNS zone name
 
-optional arguments:
-  -h, --help  show this help message and exit
-  -a N        DNSSEC algorithm number (default: 13)
-  -f N        Value of DNSKEY flags field (default: 257)
-  -K DIR      write keytag-named .pem/.dnskey/.ds triple here
+options:
+  -h, --help            show this help message and exit
+  -a N                  DNSSEC algorithm number (default: 13)
+  -f N                  Value of DNSKEY flags field (default: 257)
+  -K DIR, --keydir DIR  write keytag-named .pem/.dnskey/.ds triple here
+  --prepublish          write the private key as .prepublish.pem so the
+                        DNSKEY can be pre-published while signzone ignores
+                        it until it is renamed to .pem (requires -K)
   ```
 
   An example usage to generate an ECDSA NIST P256 (algorithm 13)
   key for example.com follows.
 
   ```
-  $ ./adnskeygen.py example.com
+  $ adnskeygen example.com
 ### Private Key file contents:
 -----BEGIN PRIVATE KEY-----
 XXXXXXX+++++++++++++++++++++REDACTEDKEY+++++++++++++++++XXXXXXXX
@@ -236,7 +240,7 @@ with `-m`:
 
 | Marker   | Selects                                                      |
 | -------- | ----------------------------------------------------------- |
-| `signer` | offline zone signer (`signzone.py`) tests — no running server |
+| `signer` | offline zone signer (`adns.signer`) tests — no running server |
 | `deleg`  | DELEG delegation-extension behavior tests                   |
 
 ```

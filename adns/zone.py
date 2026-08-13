@@ -1,16 +1,16 @@
-#!/usr/bin/env python3
-
 """
-Shared DNSSEC / zone-model utilities for adns_server and the offline signer.
+Shared zone/DNSSEC data model for adns_server and the offline signer.
 
-Contains the sorted, ENT-aware Zone model plus pure NSEC/NSEC3 name and hash
-helpers. Kept free of server-only concerns (config, sockets, online signing
-cache) so both adns_server.py and signzone.py can import it. See Signer.md §1a.
+Contains the sorted, ENT-aware Zone model; the ZoneDict authoritative-zone
+lookup table; HashableRRset (the online signature cache's dict key wrapper);
+and the pure NSEC/NSEC3 name and hash helpers, including all three record
+builders (make_nsec_rrset, make_nsec3_rrset, make_nsec3_rrset_minimal). Kept
+free of server-only concerns (config, sockets, online signing cache) so both
+adns.server and adns.signer can import it. See Design.md sections 2 and 8.
 """
 
 import hashlib
 import base64
-import enum
 
 import dns.zone
 import dns.name
@@ -23,33 +23,8 @@ import dns.dnssec
 from dns.rdtypes.ANY import NSEC
 from dns.rdtypes.ANY import NSEC3
 from sortedcontainers import SortedDict
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-
-class RRtype(enum.IntEnum):
-    """Resource Record types"""
-    NXNAME = 128
-    DELEG = 61440
-    DELEGPARAM = 65433
-
-## RR types that are authoritative in the parent zone
-AUTH_IN_PARENT_RRTYPES = [dns.rdatatype.DS, RRtype.DELEG]
-
-
-def load_private_key(keyfile):
-    """
-    Load DNSSEC private key from PEM format file for online signing.
-    """
-    with open(keyfile, 'rb') as fkeyfile:
-        return load_pem_private_key(fkeyfile.read(), password=None)
-
-
-def key_basename(zonename, algorithm, keytag):
-    """Return the keytag-named base filename (no extension) shared by adnskeygen
-    and signzone: '<zonename>+<alg:03d>+<keytag:05d>'. zonename must be the
-    origin text with any trailing dot stripped. Matches BIND's +%03d+%05d
-    convention so the files are greppable and self-describing."""
-    return f"{zonename}+{algorithm:03d}+{keytag:05d}"
+from adns.constants import RRtype, AUTH_IN_PARENT_RRTYPES  # pylint: disable=unused-import
 
 
 class Zone(dns.zone.Zone):
@@ -274,6 +249,69 @@ def zone_from_file(name, zonefile):
     return zone
 
 
+class HashableRRset:
+
+    """
+    dns.rrset.RRset is not hashable. So we define another class
+    that contains an instance of it. (Subclassing requires more
+    complicated changes to more code.). This is so that we can use
+    it as a component of a key into our online signature cache.
+
+    The key includes the RRset's RDATA, not just its name and type.
+    Synthesized records (e.g. NSEC with a computed next-name, or minimal
+    NSEC3) can share an owner name and type while carrying different RDATA
+    across different responses; keying on RDATA too prevents returning a
+    signature computed over one variant for a differing one.
+    """
+
+    def __init__(self, rrset):
+        self.rrset = rrset
+        # Canonical, order-independent representation of the RDATA.
+        self._rdata_key = frozenset(
+            rdata.to_digestable(rrset.name) for rdata in rrset)
+
+    def __hash__(self):
+        return hash((self.rrset.name, self.rrset.rdtype, self._rdata_key))
+
+    def __eq__(self, other):
+        if isinstance(other, HashableRRset):
+            if self.rrset.name != other.rrset.name:
+                return False
+            if self.rrset.rdtype != other.rrset.rdtype:
+                return False
+            if self._rdata_key != other._rdata_key:
+                return False
+            return True
+        return False
+
+
+class ZoneDict:
+    """Zone Dictionary object: zone names -> zone objects"""
+
+    def __init__(self):
+        self.data = {}
+        self.zonelist = None
+
+    def set_zonelist(self):
+        """Create list of zone names"""
+        self.zonelist = list(reversed(sorted(self.data.keys())))
+
+    def get_zonelist(self):
+        """Return zone list"""
+        return self.zonelist
+
+    def add(self, zonename, zone):
+        """Add zonename->zone object"""
+        self.data[zonename] = zone
+
+    def find(self, qname):
+        """Return closest enclosing zone object for the qname"""
+        for zname in self.zonelist:
+            if qname.is_subdomain(zname):
+                return self.data[zname]
+        return None
+
+
 B32_TO_EXT_HEX = bytes.maketrans(b'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567',
                                  b'0123456789ABCDEFGHIJKLMNOPQRSTUV')
 NSEC3HASH_SIZE_IN_OCTETS = 20
@@ -354,6 +392,33 @@ def make_nsec3_rrset(params, owner, nextname, rrtypes, ttl):
     rdataset.add(rdata)
     rrset.update(rdataset)
     return rrset
+
+
+def make_nsec3_rrset_minimal(params, zone, owner, rrtypes, ttl,  # pylint: disable=too-many-positional-arguments
+                             covering=False):
+    """
+    Create minimal NSEC3 RRset. If "covering" is True, then the NSEC3
+    record will cover the given owner name, otherwise it will match it.
+    """
+
+    owner_hash = nsec3hash(owner,
+                           params.algorithm, params.salt, params.iterations,
+                           binary_out=True)
+    hash_owner_int = int.from_bytes(owner_hash, byteorder='big')
+
+    owner_int = (hash_owner_int - 1) if covering else hash_owner_int
+    owner_bytes = owner_int.to_bytes(NSEC3HASH_SIZE_IN_OCTETS, 'big')
+    owner_hash = base64.b32encode(owner_bytes).translate(NSEC3.b32_normal_to_hex)
+    new_owner = dns.name.Name((owner_hash,) + zone.labels)
+
+    next_int = hash_owner_int + 1
+    next_bytes = next_int.to_bytes(NSEC3HASH_SIZE_IN_OCTETS, 'big')
+
+    return make_nsec3_rrset(params,
+                            new_owner,
+                            next_bytes,
+                            rrtypes,
+                            ttl)
 
 
 MAX_LABEL_OCTETS = 63

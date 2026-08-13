@@ -1,8 +1,9 @@
 """
 Pytest fixtures for the adns_server automated test suite.
 
-The suite launches a private instance of adns_server.py on an ephemeral
-loopback port, serving the purpose-built zones under test_zones/, and drives
+The suite launches a private instance of the adns server (`python3 -m adns`)
+on an ephemeral loopback port, serving the purpose-built zones under
+test_zones/, and drives
 it with real DNS queries via dnspython. Responses are asserted on
 structurally (rcode, flags, sections, EDE) and, for signed zones,
 cryptographically validated -- see dnsutil.py.
@@ -31,13 +32,20 @@ import dns.rdatatype
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-SERVER = os.path.join(REPO_ROOT, "adns_server.py")
 ZONE_DIR = os.path.join(HERE, "test_zones")
 CONFIG = os.path.join(ZONE_DIR, "test.yaml")
 MINIMAL_ANY_CONFIG = os.path.join(ZONE_DIR, "test-minimal-any.yaml")
 
 DE_FLAG = 0x2000       # EDNS(0) DE (Delegation Extensions) flag
 CO_FLAG = 0x4000       # EDNS(0) CO (Compact Answers OK) flag
+
+# The server is launched as `python3 -m adns`, a package import that a
+# subprocess cannot resolve on its own -- the parent test process's
+# sys.path.insert(0, REPO_ROOT) does not propagate to a child. Put the repo
+# root on the child's PYTHONPATH explicitly.
+SUBPROCESS_ENV = {**os.environ,
+                  "PYTHONPATH": REPO_ROOT + os.pathsep +
+                  os.environ.get("PYTHONPATH", "")}
 
 
 def _free_port():
@@ -78,9 +86,10 @@ def _launch_server(config, logname):
     port = _free_port()
     logfile = open(os.path.join(HERE, logname), "w+", encoding="utf-8")
     proc = subprocess.Popen(
-        [sys.executable, SERVER, "-c", config, "-s", host, "-p", str(port),
-         "-f", "-d"],
-        cwd=ZONE_DIR, stdout=logfile, stderr=subprocess.STDOUT)
+        [sys.executable, "-m", "adns", "-c", config, "-s", host, "-p",
+         str(port), "-f", "-d"],
+        cwd=ZONE_DIR, env=SUBPROCESS_ENV, stdout=logfile,
+        stderr=subprocess.STDOUT)
 
     if not _wait_until_ready(host, port, proc):
         proc.terminate()

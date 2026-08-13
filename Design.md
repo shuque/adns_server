@@ -1,9 +1,13 @@
 # adns_server — Architecture and Design
 
 This document describes the architecture of `adns_server`: the authoritative DNS
-server (`adns_server.py`), the offline DNSSEC zone signer (`signzone.py`), and
-the key generator (`adnskeygen.py`), all built currently on a shared zone/DNSSEC
-model (`dnssec_util.py`).
+server (`adns/server.py`, entrypoint `adns/__main__.py`), the offline DNSSEC
+zone signer (`adns/signer.py`), and the key generator (`adns/keygen.py`), all
+built on a shared zone/DNSSEC model (`adns/zone.py`). This reflects the
+post-module-split layout (§10, now fully implemented); earlier sections that
+still describe file paths in the pre-split single-file form (`adns_server.py`,
+`signzone.py`, `adnskeygen.py`, `dnssec_util.py`) are historical and superseded
+by §10.
 
 It is both a descriptive reference for the code as it stands and a forward
 specification: §10 defines the target module architecture that a planned
@@ -26,14 +30,16 @@ Its main purpose is prototyping and protocol-conformance experimentation —
 DELEG, Compact Denial of Existence, online signing, DNS cookies — not
 production serving or high throughput.
 
-The package comprises three programs over one shared library:
+The package comprises three programs over one shared library, all inside the
+`adns/` package (console scripts `adns-server`/`signzone`/`adnskeygen`; see
+§10 for the full module layout):
 
 | Program | Role |
 |---|---|
-| `adns_server.py` | The authoritative server: loads zones, answers queries, signs online. |
-| `signzone.py` | Offline DNSSEC signer: strip-and-re-sign a zone to a `.signed` file. |
-| `adnskeygen.py` | DNSSEC key generator: emits keytag-named PEM / DNSKEY / DS files. |
-| `dnssec_util.py` | Shared model: the `Zone` subclass, NSEC/NSEC3 helpers, `RRtype`. |
+| `adns/server.py` (+ `adns/__main__.py`) | The authoritative server: loads zones, answers queries, signs online. |
+| `adns/signer.py` | Offline DNSSEC signer: strip-and-re-sign a zone to a `.signed` file. |
+| `adns/keygen.py` | DNSSEC key generator: emits keytag-named PEM / DNSKEY / DS files. |
+| `adns/zone.py` | Shared model: the `Zone` subclass, NSEC/NSEC3 helpers, `RRtype`. |
 
 **What the server does:** serves zones in master-file format; supports unsigned
 zones, pre-signed zones (NSEC and NSEC3), and online (dynamic) signing with a
@@ -62,8 +68,10 @@ signature cache.
 ## 2. Data model
 
 The data model is the foundation the rest of the system builds on, and it lives
-in `dnssec_util.py` so both the server and the offline signer share the same
-notion of what a zone is.
+in `adns/zone.py` so both the server and the offline signer share the same
+notion of what a zone is. (`load_private_key`/`key_basename` live in
+`adns/crypto.py`; see §10.2. The pre-split `dnssec_util.py` compatibility shim
+that used to re-export these has been retired — Task 9, §10.2.)
 
 ### 2.1 The `Zone` subclass and its `SortedDict` backend
 
@@ -278,9 +286,9 @@ live in **DELEG.md**.
 ### 5.1 Online signing and the signature cache
 
 When a zone has `dynamic_signing: true`, RRsets are signed on demand as
-responses are built. `sign_rrset(zone, h_rrset)` wraps `dns.dnssec.sign` with
-inception/expiration derived from the current time (`RRSIG_INCEPTION_OFFSET`,
-`RRSIG_LIFETIME`) and returns an RRSIG RRset.
+responses are built. `sign_rrset(zone, h_rrset)`, defined in `adns/crypto.py`,
+wraps `dns.dnssec.sign` with inception/expiration derived from the current
+time (`RRSIG_INCEPTION_OFFSET`, `RRSIG_LIFETIME`) and returns an RRSIG RRset.
 
 It is wrapped in a `cachetools.TTLCache` (keyed by zone + `HashableRRset`, §2.3)
 because the same RRset is frequently re-signed across queries, and public-key
@@ -319,7 +327,7 @@ without colliding with or spanning a real name. The NSEC form synthesizes two
 NSECs (one covering the queried name, one covering the relevant wildcard) with
 owner/next names built around the *next-closer* name rather than the full qname;
 the `successor_name` / `covering_predecessor` / `covering_successor` helpers
-(`dnssec_util.py`) implement the interval endpoints and collision-avoidance
+(`adns/zone.py`) implement the interval endpoints and collision-avoidance
 rules, documented at length in their docstrings and in the `rfc4470-white-lies`
 design note. The NSEC3 form is arguably more involved: it assembles the full
 closest-encloser proof from three minimal NSEC3 records — closest-encloser
@@ -417,17 +425,19 @@ states this explicitly).
 
 ---
 
-## 8. The offline signer (`signzone.py`)
+## 8. The offline signer (`adns/signer.py`)
 
 The offline signer produces a conventional pre-signed zone (`.signed`) that the
 server — or any RFC 4035/5155 authoritative server — can serve. It exists so
 DELEG zones can be served pre-signed, which current third-party signers mostly
 can't do (they treat DELEG as non-authoritative glue and neither sign it nor set
 its bitmap bit). It shares the entire zone/DNSSEC model with the server via
-`dnssec_util.py`, so its output matches the server's serving semantics by
-construction.
+`adns/zone.py` (plus `adns/crypto.py` for key loading and `adns/constants.py`
+for `AUTH_IN_PARENT_RRTYPES`), so its output matches the server's serving
+semantics by construction. It ships as the `signzone` console script
+(`adns.signer:main`), and is also runnable as `python3 -m adns.signer`.
 
-**CLI and I/O contract.** `signzone.py [options] <zonename> <zonefile>`; zone
+**CLI and I/O contract.** `signzone [options] <zonename> <zonefile>`; zone
 name is explicit (no `$ORIGIN` guessing). Output is `<zonefile>.signed` by
 default (`-o -` for stdout), written to a temp file and atomically renamed on
 success so a failed run leaves no partial output and never overwrites the input.
@@ -471,7 +481,7 @@ then build the denial chain. NSEC mode links each real-data/delegation owner's
 NSEC to the next in canonical order (ENTs excluded, §2.2); NSEC3 mode
 (data-driven from apex NSEC3PARAM) hashes every owner **including ENTs**, sorts
 by hash, and links the hash-ordered chain. The signing RRSIG helper is a plain,
-un-cached function in `signzone.py` (distinct from the server's cached
+un-cached function in `adns/signer.py` (distinct from the server's cached
 `sign_rrset`).
 
 **DELEG in the signer** reduces to: the cut predicate recognizes
@@ -480,7 +490,7 @@ Everything else is the generic engine. DELEG and DELEGPARAM are handled as RFC
 3597 generic rdata; dnspython loads, digests, and builds NSEC/NSEC3 bitmaps for
 the numeric types without registration. `reject_wildcard_deleg()` runs first
 and fails the run (nonzero, no output) on a wildcard-DELEG violation. The
-DNSKEY-ADT bit needs no signer code: `adnskeygen.py -f 259` generates such a
+DNSKEY-ADT bit needs no signer code: `adnskeygen -f 259` generates such a
 key and the signer treats it generically.
 
 **Operator workflows.** (i) *Unsigned zone as source of truth* (recommended):
@@ -492,7 +502,7 @@ tool for editing contents.
 
 **Non-goals** (explicit): NSEC3 opt-out; online/dynamic black-lie generation
 (CDOE is an online technique); incremental/partial re-signing; serial policy
-beyond `--bump`; key generation (that is `adnskeygen.py`).
+beyond `--bump`; key generation (that is `adns/keygen.py`).
 
 **Deferred:** Multi-algorithm zone support will be implemented in the future.
 The plan will be to deliberately *not* enforce the strict RFC 4035 §2.2 "one
@@ -501,15 +511,17 @@ in draft-huque-dnsop-multi-alg-rules.
 
 ---
 
-## 9. Key generation (`adnskeygen.py`)
+## 9. Key generation (`adns/keygen.py`)
 
-`adnskeygen.py` generates an ECDSA P-256 (alg 13) or Ed25519 (alg 15) key and
-prints the private PEM, the DNSKEY RDATA/keytag, and the DNSKEY RRset. With
-`-K DIR` it writes the keytag-named triple the signer consumes:
-`<zone>+<alg>+<keytag>.{pem,dnskey}`, plus `.ds` **only for SEP keys** (KSK/CSK)
-— a plain ZSK gets no DS, matching common operator practice. `--prepublish`
-writes the private key as `.prepublish.pem` so the DNSKEY can be pre-published
-while the signer ignores it until it is activated by renaming to `.pem`.
+`adns/keygen.py` (console script `adnskeygen`, `adns.keygen:main`; also
+runnable as `python3 -m adns.keygen`) generates an ECDSA P-256 (alg 13) or
+Ed25519 (alg 15) key and prints the private PEM, the DNSKEY RDATA/keytag, and
+the DNSKEY RRset. With `-K DIR` it writes the keytag-named triple the signer
+consumes: `<zone>+<alg>+<keytag>.{pem,dnskey}`, plus `.ds` **only for SEP keys**
+(KSK/CSK) — a plain ZSK gets no DS, matching common operator practice.
+`--prepublish` writes the private key as `.prepublish.pem` so the DNSKEY can be
+pre-published while the signer ignores it until it is activated by renaming to
+`.pem`.
 
 ---
 
@@ -537,21 +549,139 @@ Deployment stays `pip install` into a venv (as guvnor already does); the
 single-file convenience is dropped. The console scripts are thin `main()`
 wrappers over the package.
 
+**Status: Task 8 done.** `adns/__main__.py` is now the real entrypoint
+(`ServerContext`/`Preferences`/`process_args` from `adns.config`, `ZoneDict`
+from `adns.zone`, `init_logging` from `adns.log`, `setup_server`/
+`run_event_loop` from `adns.server`), and `adns_server.py` — the legacy
+top-level module it used to shim through — is deleted. `pyproject.toml`
+installs `adns` as a package and registers the `adns-server =
+"adns.__main__:main"` console script; it still kept `dnssec_util`, `signzone`,
+and `adnskeygen` as top-level `py-modules` at that point (still consumed by
+`signzone.py`/`adnskeygen.py`, which had not yet moved into the package).
+`script-files` is gone. The package version (`adns.__version__`) is `0.12.0`.
+
+**Status: Task 9 done.** `signzone.py` and `adnskeygen.py` moved into the
+package verbatim as `adns/signer.py` and `adns/keygen.py`, and `dnssec_util.py`
+is deleted outright (not merely deprecated — its consumers, the signer and
+keygen, now import `adns.zone`/`adns.crypto`/`adns.constants` directly).
+`pyproject.toml`'s `py-modules` is now empty; `[project.scripts]` adds
+`signzone = "adns.signer:main"` and `adnskeygen = "adns.keygen:main"` alongside
+`adns-server`. No top-level modules remain outside the `adns/` package.
+
 ### 10.2 Module layout (`adns/` package)
 
-| Module | Responsibility | Grows from |
-|---|---|---|
-| `adns/__init__.py` | `__version__`, package exports | `__version__` |
-| `adns/config.py` | YAML parse, `Preferences`, `ServerContext`, per-zone config, CLI args | config/args functions |
-| `adns/zone.py` | `Zone`, `ZoneDict`, ENT synthesis, NSEC/NSEC3 name+hash helpers, `HashableRRset`, `RRtype`, `AUTH_IN_PARENT_RRTYPES` | `dnssec_util.py` + `ZoneDict`/`HashableRRset` |
-| `adns/crypto.py` | online `sign_rrset` + signature cache, key loading, minimal-NSEC3 builder | signing helpers |
-| `adns/response.py` | `DNSquery`, `DNSresponse` core, and the mixins it composes | the `DNSresponse` class |
-| `adns/server.py` | sockets, event loop, worker pool, daemon/privdrop/pidfile, signals, logging | runtime functions |
-| `adns/__main__.py` | `main()` entrypoint glue | `__main__` block |
+| Module | Responsibility |
+|---|---|
+| `adns/log.py` | process-wide logging singleton (`log_message`, `log_fatal`, `RateLimitedLog`, `init_logging`); bottom leaf, imports nothing internal |
+| `adns/__init__.py` | `__version__`, package exports |
+| `adns/constants.py` | `RRtype`, `AUTH_IN_PARENT_RRTYPES`, `EdnsFlag`, `EDECode`; leaf, imports nothing internal |
+| `adns/zone.py` | `Zone`, `ZoneDict`, `HashableRRset`, ENT synthesis, NSEC/NSEC3 name+hash helpers, all three record-builders, `zone_from_file`, predecessor/successor helpers |
+| `adns/crypto.py` | `sign_rrset` + signature cache, `load_private_key`, `key_basename` |
+| `adns/response.py` | `DNSquery`, `DNSresponse` + the 4 mixins |
+| `adns/config.py` | `Preferences`, `ServerContext`, YAML/zone/CLI-arg functions |
+| `adns/server.py` | sockets, event loop, worker pool, daemon/privdrop/pidfile, signals |
+| `adns/__main__.py` | `main()` glue |
+| `adns/signer.py` | offline signer (moved from the former top-level `signzone.py`) |
+| `adns/keygen.py` | key generator (moved from the former top-level `adnskeygen.py`) |
 
-`dnssec_util.py`'s content lands in `adns/zone.py` (or is re-exported from there)
-so the signer and server share one module; the standalone `dnssec_util.py` can
-be retired once both import from the package.
+All three NSEC/NSEC3 record-builders (`make_nsec_rrset`, `make_nsec3_rrset`,
+`make_nsec3_rrset_minimal`) live in `adns/zone.py`, alongside the other
+zone/DNSSEC data-model code that the former `dnssec_util.py` used to hold, plus
+`ZoneDict` and `HashableRRset` (absorbed from `adns_server.py`);
+`adns/crypto.py` is narrowly scoped to signing (`sign_rrset` + its cache) and
+private-key loading (`load_private_key`, `key_basename`).
+
+**Status: `adns/log.py` done.** The logging singleton (`init_logging`,
+`log_message`, `log_fatal`, `RateLimitedLog`, plus the `_LOG_LOCK`/
+`_LOG_DAEMON`/`_LOG_PRI` module state) moved out of `adns_server.py` into
+`adns/log.py`, verbatim. It is the bottom leaf of the import DAG — it imports
+nothing internal — so it sits below `constants` and everything else can
+depend on it, including the code that will land in `adns/response.py` next.
+
+**Status: `adns/zone.py` done.** The former `dnssec_util.py`'s content (except
+`load_private_key`/`key_basename`, which were Task 4's) landed in
+`adns/zone.py`, verbatim, along with `ZoneDict`/`HashableRRset`/
+`make_nsec3_rrset_minimal` moved out of `adns_server.py`.
+
+**Status: `adns/crypto.py` done.** `sign_rrset` (plus its four cache/signing
+constants, `RRSIG_INCEPTION_OFFSET`/`RRSIG_LIFETIME`/`CACHE_SIZE`/
+`CACHE_TTL`) moved out of `adns_server.py`, and `load_private_key`/
+`key_basename` moved out of the former `dnssec_util.py`, into `adns/crypto.py`,
+verbatim.
+
+**Status: `dnssec_util.py` retired (Task 9).** After Task 4 it was a thin
+re-export shim (`load_private_key`/`key_basename` re-exported from
+`adns.crypto`, everything else re-exported from `adns.zone`), kept only so the
+still-top-level `signzone.py`/`adnskeygen.py` and their tests kept working.
+Task 9 moved both of those consumers into the package and repointed their
+imports directly at `adns.zone`/`adns.crypto`/`adns.constants`, so the shim had
+no remaining callers and was deleted outright (`git rm dnssec_util.py`); it is
+not merely deprecated, it no longer exists.
+
+Import DAG (acyclic, low to high): `log → constants → zone → crypto →
+response → config → server → __main__`. `adns/signer.py` depends on `zone`,
+`crypto`, and `constants`; `adns/keygen.py` depends on `constants` (or nothing
+internal).
+
+**Status: `adns/config.py` done.** `Preferences`, `ServerContext`,
+`make_arg_parser`, `init_config`, `load_zones`, `make_single_zone`,
+`set_server_af`, `process_args`, and the `PROGNAME`/`CONFIG_DEFAULT`/
+`TCP_TIMEOUT`/`MAX_WORKERS` constants moved out of `adns_server.py` into
+`adns/config.py`, verbatim. It imports `__version__` from `adns` (not a local
+redefinition — `adns_server.py` keeps its own separate `__version__ = '0.11.1'`
+for now; Task 8 unifies the two), `ZoneDict`/`zone_from_file` from `adns.zone`,
+and `load_private_key` from `adns.crypto` directly (no `dnssec_util` shim
+hop). `adns_server.py` re-imports the full symbol set (plus `PROGNAME`) for
+backward compatibility, following the same re-export idiom as the
+`adns.constants`/`adns.zone` groups; `ServerContext`/`Preferences`/
+`process_args` are also used directly by the `__main__` block that still
+lives there. `adns_server.py`'s now-unused top-level imports (`argparse`,
+`yaml`, `dataclasses.dataclass`/`field`, `typing.Optional`, and the
+`dnssec_util.load_private_key` import) were removed.
+
+**Status: `PROGNAME` hardcoded (Task 9).** `PROGNAME` was originally
+`os.path.basename(sys.argv[0])`, computed once at import time. Under the
+canonical `python3 -m adns` invocation `sys.argv[0]` is the path to
+`__main__.py`, so `PROGNAME` leaked as `"__main__.py"` into `--version`/`-h`
+banners, the startup log line, the `/tmp/{PROGNAME}.pid` fallback path, and
+`syslog.openlog()`. Task 9 hardcoded it to the literal `"adns-server"` instead,
+giving a stable program name for both `-m adns` and the installed
+`adns-server` console script; `os`/`sys` remain used elsewhere in
+`adns/config.py` (`os.path.join`, `sys.exit`) so this did not orphan either
+import.
+
+**Status: `adns/server.py` done.** The runtime/networking layer —
+`handle_sigterm`/`install_signal_handlers`, the pidfile helpers
+(`get_pid_file`/`remove_pidfile`), daemonization (`close_inherited_fds`/
+`daemon`/`drop_privs`), the socket factories (`udp4socket`/`udp6socket`/
+`tcp4socket`/`tcp6socket`), the query path (`send_socket`/`recv_socket`/
+`handle_query`/`send_servfail`/`handle_connection_udp`/`handle_connection_tcp`),
+and the event loop (`setup_sockets`/`setup_server`/`spawn_worker`/
+`run_event_loop`) — moved out of `adns_server.py` into `adns/server.py`,
+verbatim (AST-diff-confirmed identical against the pre-move source for all 21
+functions). Logging was already extracted to `adns/log.py` in Task 5a, so
+`adns/server.py` imports `log_message`/`log_fatal`/`RateLimitedLog` from there
+rather than re-moving them; it also imports `sign_rrset` from `adns.crypto`
+(for the SIGHUP cache clear), `DNSquery`/`DNSresponse` from `adns.response`,
+`PROGNAME`/`init_config` from `adns.config`, and `__version__` from `adns`
+(for the startup log line) — no cycle, since none of those modules import
+`server`. `adns_server.py` is now an explicit-re-export compat module: it
+keeps the constants/zone/crypto/log/response/config re-export groups plus a
+new `adns.server` re-export group (all runtime callables, `# pylint:
+disable=unused-import`), and retains its `if __name__ == '__main__':` block
+unchanged. Its now-dead top-level imports (`pwd`, `grp`, `resource`,
+`syslog`, `struct`, `socket`, `atexit`, `select`, `threading`, `signal`,
+`time`, `random`, `binascii`, `traceback`, `dns.zone`, `dns.message`,
+`dns.rcode`) and the local `__version__ = '0.11.1'` were removed — the
+runtime region that referenced them moved to `adns/server.py`, and
+`adns/server.py` now owns the version log line via `adns.__version__`.
+Real `main()` wiring (unifying the version and retiring this shim) is
+deferred to Task 8.
+
+**Status: Task 8 done.** `adns_server.py` (the re-export shim described in
+the two paragraphs above) is deleted. The real `main()` now lives in
+`adns/__main__.py`, wired to the `adns-server` console script; the version
+comes solely from `adns.__version__` (`0.12.0`).
 
 ### 10.3 Decomposing `DNSresponse` with mixins
 
@@ -574,12 +704,12 @@ class DNSresponse(DenialMixin, ReferralMixin, ResolveMixin, EdnsCookieMixin):
     #   prepare_response, dnssec_ok, need_edns
 ```
 
-| Mixin | Methods (clusters) |
+| Mixin | Methods |
 |---|---|
-| `DenialMixin` | `nxdomain*`, `nodata*`, `add_nsec_matching`, `add_nsec_online`, `wildcard_no_closer_match` — the §5.2 denial matrix (largest cluster) |
-| `ReferralMixin` | `do_referral*`, `get_glue`, `occluded_nxdomain*`, `next_closer_name`, `add_new_delegation_only_ede` — referral + DELEG occlusion |
-| `ResolveMixin` | `find_answer`, `find_answer_in_zone`, `process_name`, `find_rrtype`, `process_cname`, `process_dname`, `process_any_metatype` — the name-resolution walk |
-| `EdnsCookieMixin` | `do_edns_init`, `do_edns_final`, `add_cookie_option`, `process_cookie`, `verify_server_cookie`, `calculate_server_cookie` — EDNS + cookies |
+| `DenialMixin` | `nxdomain`, `nxdomain_nsec_online_compact`, `nxdomain_nsec_online`, `nxdomain_nsec3_online`, `nxdomain_nsec3_online_compact`, `nxdomain_nsec`, `nxdomain_nsec3`, `nodata`, `nodata_nsec_online`, `nodata_nsec3_online`, `nodata_nsec3_online_compact`, `nodata_nsec`, `nodata_nsec3`, `wildcard_no_closer_match`, `add_nsec_matching`, `add_nsec_online` — the §5.2 denial matrix (largest cluster) |
+| `ReferralMixin` | `do_referral`, `do_referral_traditional`, `do_referral_deleg`, `get_glue`, `add_new_delegation_only_ede`, `next_closer_name`, `occluded_nxdomain`, `occluded_nxdomain_nsec3` — referral + DELEG occlusion |
+| `ResolveMixin` | `process_any_metatype`, `find_rrtype`, `process_cname`, `process_dname`, `process_name`, `find_answer_in_zone`, `find_answer` — the name-resolution walk |
+| `EdnsCookieMixin` | `add_cookie_option`, `verify_server_cookie`, `calculate_server_cookie`, `process_cookie`, `do_edns_init`, `do_edns_final` — EDNS + cookies |
 
 Each mixin's docstring names the `self.` attributes and sibling methods it
 relies on — the written contract that compensates for the implicit dependencies
@@ -587,11 +717,63 @@ inherent to mixins. If a cluster later proves genuinely separable in state (a
 candidate: denial-of-existence), it can graduate to a collaborator object; the
 mixin split does not preclude that.
 
+**Status: `adns/response.py` done.** `DNSquery` and `DNSresponse` (split into
+`DenialMixin`/`ReferralMixin`/`ResolveMixin`/`EdnsCookieMixin` exactly per the
+table above, plus core plumbing on the `DNSresponse` class body) moved out of
+`adns_server.py`, verbatim, along with the three predicate helpers
+(`query_meta_type`, `compact_answer_ok`, `deleg_ext_ok`) and the
+cookie/message-size constants they and the moved methods depend on
+(`METATYPE_MIN`/`MAX`, `COOKIE_TIMESTAMP_DRIFT`, `COOKIE_RECALCULATE_TIME`,
+`UDP_MAXSIZE_NOEDNS`, `TCP_MAXSIZE`). `adns_server.py` now imports
+`DNSquery`/`DNSresponse` from `adns.response` and re-exports them (plus
+`RRtype`/`AUTH_IN_PARENT_RRTYPES`, kept as a compatibility re-export for the
+same reason as the `adns.zone` symbols in the paragraph above).
+
 ### 10.4 What does not change
 
-Wire behavior, config format, CLI surface, and the test suite's black-box
-assertions must be identical across the split — it is a pure internal
-reorganization (a patch-level change on the semver surface, though the packaging
-change to console scripts is a minor bump). The direct-import (`ctx`) test
-modality's import paths change to the new module locations; the black-box
-modality is unaffected.
+Wire behavior, config format, and the test suite's black-box assertions must be
+identical across the split — it is a pure internal reorganization by itself.
+The direct-import (`ctx`) test modality's import paths change to `adns.*` (e.g.
+`adns.response.DNSresponse`, `adns.zone.Zone`), in lockstep with each
+extraction task; the black-box modality (subprocess + real DNS queries) is
+unaffected in what it asserts, though its launch *mechanism* changed in Task 8
+(below).
+
+**Status: Task 8 done — the server-side split is complete.** `adns_server.py`
+is deleted; there is no longer a top-level compat shim. `adns/__main__.py` is
+the real entrypoint (`ServerContext`/`Preferences`/`process_args` from
+`adns.config`, `ZoneDict` from `adns.zone`, `init_logging` from `adns.log`,
+`setup_server`/`run_event_loop` from `adns.server`), wired to the
+`adns-server` console script via `[project.scripts]`. The direct-import test
+modality now imports `adns.config`/`adns.zone`/`adns.response`/`adns.server`
+directly rather than through the `adns_server` re-export aggregator (which no
+longer exists) — `test_zone_module.py`'s
+`test_adns_server_reexports_moved_symbols` was deleted along with it, since it
+only guarded that now-gone re-export surface. The black-box modality's launch
+mechanism (the earlier deferred note here) is resolved: `conftest.py` and
+`test_daemon.py` now launch the server as `python3 -m adns ...` instead of
+`python3 adns_server.py ...`, with `PYTHONPATH` set on the subprocess `env` so
+the child can resolve the `adns` package (the parent's `sys.path.insert` does
+not propagate to a child process). At this point (end of Task 8) `dnssec_util.py`
+and its consumers (`signzone.py`, `adnskeygen.py`) were unchanged and
+deliberately deferred to Task 9.
+
+**Status: Task 9 done — the signer/keygen move and shim retirement are
+complete.** `signzone.py` and `adnskeygen.py` moved into the package verbatim
+as `adns/signer.py` and `adns/keygen.py`, with their `dnssec_util` imports
+repointed to `adns.zone`/`adns.crypto`/`adns.constants`. `dnssec_util.py` had
+no remaining callers once that move landed, so it was deleted outright
+(`git rm dnssec_util.py`) rather than left as a shim. No top-level `.py`
+modules remain outside the `adns/` package; `pyproject.toml`'s `py-modules` is
+empty.
+
+**Version.** The split lands as `0.12.0` — a minor bump, not a patch. The
+internal reorganization is semver-invisible on its own, but the CLI surface
+does change: `adns_server.py`/`signzone.py`/`adnskeygen.py` become
+`adns-server`/`signzone`/`adnskeygen` console scripts (no `.py` suffix, per
+§10.1), and that packaging/CLI-surface change is what makes this a minor bump
+rather than a patch. `adns-server` (via `adns.__main__:main`) shipped in Task
+8; `signzone`/`adnskeygen` (via `adns.signer:main`/`adns.keygen:main`) shipped
+in Task 9, completing the console-script surface with no further version bump
+(per the Task 9 brief: the CLI-surface minor bump to `0.12.0` already covers
+this).
