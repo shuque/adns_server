@@ -596,6 +596,8 @@ keygen, now import `adns.zone`/`adns.crypto`/`adns.constants` directly).
 | `adns/__main__.py` | `main()` glue |
 | `adns/signer.py` | offline signer (moved from the former top-level `signzone.py`) |
 | `adns/keygen.py` | key generator (moved from the former top-level `adnskeygen.py`) |
+| `adns/deleg.py` | DelegInfo (draft-ietf-deleg §3) wire codec: key registry, SvcParam-style encode/decode, §3.4/§3.5 validators, RR-line and octet-breakdown formatters; imports `constants` only, I/O-free |
+| `adns/deleg_rdata.py` | thin CLI front end over `adns/deleg.py` (the `deleg-rdata` console script) |
 
 All three NSEC/NSEC3 record-builders (`make_nsec_rrset`, `make_nsec3_rrset`,
 `make_nsec3_rrset_minimal`) live in `adns/zone.py`, alongside the other
@@ -634,7 +636,10 @@ not merely deprecated, it no longer exists.
 Import DAG (acyclic, low to high): `log → constants → zone → crypto →
 response → config → server → __main__`. `adns/signer.py` depends on `zone`,
 `crypto`, and `constants`; `adns/keygen.py` depends on `constants` (or nothing
-internal).
+internal). `adns/deleg.py` depends on `constants` only, and
+`adns/deleg_rdata.py` on `adns/deleg.py` and `__version__` — a self-contained
+`constants → deleg → deleg_rdata` side branch that the server/response path
+does not import.
 
 **Status: `adns/config.py` done.** `Preferences`, `ServerContext`,
 `make_arg_parser`, `init_config`, `load_zones`, `make_single_zone`,
