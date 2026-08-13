@@ -1,41 +1,31 @@
-#!/usr/bin/env python3
-#
-
 """
-Generate a DELEG or DELEGPARAM resource record in RFC 3597 generic ("\\#")
-presentation format from a set of DelegInfo key=value pairs.
+DelegInfo (draft-ietf-deleg Section 3) wire codec.
 
-The RDATA format is the DelegInfos list defined in draft-ietf-deleg Section 3,
-which reuses the SvcParams wire encoding of SVCB [RFC9460] Section 2.2: a
-sequence of (key, length, value) triples in strictly increasing key order with
-no duplicate keys.
+The DELEG / DELEGPARAM RDATA is the DelegInfos list of draft-ietf-deleg
+Section 3, which reuses the SvcParams wire encoding of SVCB [RFC9460]
+Section 2.2: a sequence of (key, length, value) triples in strictly
+increasing key order with no duplicate keys.
 
-Example:
-
-    $ deleg_rdata.py child.example. server-ipv4=192.0.2.1 \\
-                     server-ipv6=2001:db8::1
-    child.example. IN TYPE61440 \\# 28 000100040102030100...
-
-    $ deleg_rdata.py --type DELEGPARAM cfg.example. \\
-                     server-name=ns1.example.,ns2.example.
-    cfg.example. IN TYPE65433 \\# ...
+This module is I/O-free (no argparse, no stdout); the command-line front end
+lives in adns/deleg_rdata.py. describe_rdata() is the one exception: it is an
+explicit octet-level formatter that writes to a caller-supplied stream.
 """
 
 import sys
-import argparse
 import socket
 import struct
 
 import dns.name
 import dns.exception
 
+from adns.constants import RRtype
 
-__version__ = '0.2.0'
 
-# Record type codes (pre-standardization; agreed with collaborators).
+# Record type codes, sourced from the package's canonical RRtype enum
+# (pre-standardization; agreed with collaborators).
 RRTYPE = {
-    "DELEG": 61440,
-    "DELEGPARAM": 65433,
+    "DELEG": int(RRtype.DELEG),
+    "DELEGPARAM": int(RRtype.DELEGPARAM),
 }
 
 # DelegInfo key registry (draft-ietf-deleg Section 8.2.2).
@@ -174,7 +164,7 @@ def encode_value(keynum, value, origin):
         return encode_ipv4(value)
     if keynum == 2:
         return encode_ipv6(value)
-    if keynum in (3, 4):
+    if keynum in {3, 4}:
         return encode_names(value, origin)
     return encode_generic(value)
 
@@ -217,8 +207,14 @@ def build_deleginfos(pairs, origin):
     return rdata
 
 
-def check_semantics(pairs, strict):
-    """Warn (or, with strict, error) on Section 3.4 / 3.5 semantic violations."""
+def check_semantics(pairs, strict=False):
+    """
+    Check the Section 3.4 / 3.5 semantic rules for a set of parsed pairs.
+
+    Returns a list of human-readable problem strings (empty when the record is
+    conformant). With strict=True, raises DelegError on the first problem
+    instead of returning the list.
+    """
     keynums = {keynum for keynum, _, _ in pairs}
     values = {keynum: value for keynum, _, value in pairs}
     problems = []
@@ -243,10 +239,9 @@ def check_semantics(pairs, strict):
                     f"'mandatory' references key '{tok}' which is not present "
                     "in this record (Section 3.5)")
 
-    for problem in problems:
-        if strict:
-            raise DelegError(problem)
-        print(f"warning: {problem}", file=sys.stderr)
+    if strict and problems:
+        raise DelegError(problems[0])
+    return problems
 
 
 def format_rr(owner, rrtype_num, rdata, ttl=None):
@@ -332,7 +327,7 @@ def _describe_value(keynum, value, out):
         for chunk, text in _decode_addrs(value, socket.AF_INET6, 16):
             print(f"               [{len(chunk)}] {chunk.hex()}  {text}",
                   file=out)
-    elif keynum in (3, 4):
+    elif keynum in {3, 4}:
         print("             wire names:", file=out)
         for chunk, text in _decode_names(value):
             print(f"               [{len(chunk)}] {chunk.hex()}  {text}",
@@ -347,35 +342,6 @@ def _describe_value(keynum, value, out):
             pass
 
 
-def process_arguments():
-    """Process command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Generate a DELEG/DELEGPARAM RR in RFC 3597 generic "
-                    "format from DelegInfo key=value pairs.")
-    parser.add_argument("owner", help="owner (domain) name of the record")
-    parser.add_argument("pairs", nargs="*", metavar="key=value",
-                        help="DelegInfo key=value pairs "
-                             "(e.g. server-ipv4=192.0.2.1)")
-    parser.add_argument("--type", dest="rrtype", default="DELEG",
-                        help="record type: DELEG (default), DELEGPARAM, "
-                             "or a numeric type code")
-    parser.add_argument("--ttl", type=int, default=None,
-                        help="TTL to include in the RR (default: omitted)")
-    parser.add_argument("--origin", default=None,
-                        help="origin for resolving relative names in "
-                             "server-name/include-delegparam values "
-                             "(default: root)")
-    parser.add_argument("--strict", action="store_true",
-                        help="treat Section 3.4/3.5 semantic violations as "
-                             "errors instead of warnings")
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="print an octet-level breakdown of the RDATA "
-                             "components to stderr")
-    parser.add_argument("--version", action="version",
-                        version=f"%(prog)s {__version__}")
-    return parser.parse_args()
-
-
 def rrtype_number(rrtype):
     """Resolve a --type argument to a numeric RR type code."""
     upper = rrtype.upper()
@@ -388,27 +354,3 @@ def rrtype_number(rrtype):
     if 0 <= num <= 65535:
         return num
     raise DelegError(f"record type out of range: {rrtype}")
-
-
-def main():
-    """Entry point."""
-    config = process_arguments()
-    try:
-        rrtype_num = rrtype_number(config.rrtype)
-        owner = dns.name.from_text(config.owner)
-        origin = (dns.name.from_text(config.origin)
-                  if config.origin else dns.name.root)
-        pairs = parse_pairs(config.pairs)
-        check_semantics(pairs, config.strict)
-        rdata = build_deleginfos(pairs, origin)
-    except DelegError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        sys.exit(1)
-    print(format_rr(owner.to_text(), rrtype_num, rdata, ttl=config.ttl))
-    if config.verbose:
-        sys.stdout.flush()
-        describe_rdata(rdata)
-
-
-if __name__ == "__main__":
-    main()

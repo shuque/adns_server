@@ -52,6 +52,7 @@ py-modules = []
 adns-server = "adns.__main__:main"
 signzone = "adns.signer:main"
 adnskeygen = "adns.keygen:main"
+deleg-rdata = "adns.deleg_rdata:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "adns.__version__"}
