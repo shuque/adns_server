@@ -1,4 +1,4 @@
-"""Unit + round-trip tests for signzone.py (NSEC / NSEC3 single-CSK)."""
+"""Unit + round-trip tests for adns.signer (NSEC / NSEC3 single-CSK)."""
 import base64
 import os
 import subprocess
@@ -10,27 +10,36 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-import dnssec_util  # noqa: E402
+import adns.zone     # noqa: E402
+import adns.crypto    # noqa: E402
 
 pytestmark = pytest.mark.signer
 
+# `-m adns.keygen` is a package import that a subprocess cannot resolve on its
+# own -- this process's sys.path.insert(0, REPO_ROOT) above does not propagate
+# to a child. Put the repo root on the child's PYTHONPATH explicitly (Task 8
+# pattern, reused here for the signer/keygen subprocess launches).
+SUBPROCESS_ENV = {**os.environ,
+                  "PYTHONPATH": REPO_ROOT + os.pathsep +
+                  os.environ.get("PYTHONPATH", "")}
+
 
 def test_key_basename_format():
-    assert dnssec_util.key_basename("signer-nsec.test", 13, 34063) == \
+    assert adns.crypto.key_basename("signer-nsec.test", 13, 34063) == \
         "signer-nsec.test+013+34063"
     # alg and keytag are zero-padded to 3 and 5 digits respectively.
-    assert dnssec_util.key_basename("x.test", 8, 42) == "x.test+008+00042"
+    assert adns.crypto.key_basename("x.test", 8, 42) == "x.test+008+00042"
 
 
-GENKEY = os.path.join(REPO_ROOT, "adnskeygen.py")
+GENKEY = [sys.executable, "-m", "adns.keygen"]
 
 
 def test_adnskeygen_keydir_writes_triple(tmp_path):
     keydir = tmp_path / "keys"
     result = subprocess.run(
-        [sys.executable, GENKEY, "signer-nsec.test", "-a", "13", "-f", "257",
-         "--keydir", str(keydir)],
-        capture_output=True, text=True, check=True)
+        GENKEY + ["signer-nsec.test", "-a", "13", "-f", "257",
+                  "--keydir", str(keydir)],
+        capture_output=True, text=True, check=True, env=SUBPROCESS_ENV)
     pems = list(keydir.glob("signer-nsec.test+013+*.pem"))
     assert len(pems) == 1, result.stdout
     base = pems[0].name[:-4]  # strip .pem
@@ -44,7 +53,7 @@ def test_adnskeygen_keydir_writes_triple(tmp_path):
     import dns.rdata
     import dns.rdataclass
     import dns.rdatatype
-    key = dnssec_util.load_private_key(str(pems[0]))
+    key = adns.crypto.load_private_key(str(pems[0]))
     assert key is not None
     dnskey_text = (keydir / (base + ".dnskey")).read_text()
     # basename tag is the last +NNNNN before .pem
@@ -58,9 +67,9 @@ def test_adnskeygen_keydir_writes_triple(tmp_path):
 def test_adnskeygen_prepublish_writes_prepublish_pem(tmp_path):
     keydir = tmp_path / "keys"
     result = subprocess.run(
-        [sys.executable, GENKEY, "prepub.test", "-a", "13", "-f", "256",
-         "--keydir", str(keydir), "--prepublish"],
-        capture_output=True, text=True, check=True)
+        GENKEY + ["prepub.test", "-a", "13", "-f", "256",
+                  "--keydir", str(keydir), "--prepublish"],
+        capture_output=True, text=True, check=True, env=SUBPROCESS_ENV)
     # The private key is written with the .prepublish.pem suffix, so
     # discover_keys' exact <zone>+<alg>+<keytag>.pem match ignores it: the
     # DNSKEY is published but not used to sign until the operator renames it.
@@ -80,8 +89,8 @@ def test_adnskeygen_prepublish_writes_prepublish_pem(tmp_path):
 def test_adnskeygen_prepublish_requires_keydir():
     # --prepublish without -K/--keydir has nowhere to write the .prepublish.pem.
     result = subprocess.run(
-        [sys.executable, GENKEY, "prepub.test", "--prepublish"],
-        capture_output=True, text=True)
+        GENKEY + ["prepub.test", "--prepublish"],
+        capture_output=True, text=True, env=SUBPROCESS_ENV)
     assert result.returncode != 0
     assert "requires -K" in result.stderr
 
@@ -91,18 +100,18 @@ def test_adnskeygen_ds_only_for_sep_key(tmp_path):
     # (-f 257) gets a .ds; a ZSK (-f 256) does not.
     ksk_dir = tmp_path / "ksk"
     ksk = subprocess.run(
-        [sys.executable, GENKEY, "sep.test", "-a", "13", "-f", "257",
-         "--keydir", str(ksk_dir)],
-        capture_output=True, text=True, check=True)
+        GENKEY + ["sep.test", "-a", "13", "-f", "257",
+                  "--keydir", str(ksk_dir)],
+        capture_output=True, text=True, check=True, env=SUBPROCESS_ENV)
     ds = list(ksk_dir.glob("sep.test+013+*.ds"))
     assert len(ds) == 1
     assert "### DS record" in ksk.stdout
 
     zsk_dir = tmp_path / "zsk"
     zsk = subprocess.run(
-        [sys.executable, GENKEY, "sep.test", "-a", "13", "-f", "256",
-         "--keydir", str(zsk_dir)],
-        capture_output=True, text=True, check=True)
+        GENKEY + ["sep.test", "-a", "13", "-f", "256",
+                  "--keydir", str(zsk_dir)],
+        capture_output=True, text=True, check=True, env=SUBPROCESS_ENV)
     assert not list(zsk_dir.glob("sep.test+013+*.ds"))
     assert list(zsk_dir.glob("sep.test+013+*.dnskey"))   # .dnskey still written
     assert "### DS record" not in zsk.stdout
@@ -120,7 +129,7 @@ def _load_fixture():
     cwd = os.getcwd()
     os.chdir(ZONE_DIR)
     try:
-        return dnssec_util.zone_from_file(
+        return adns.zone.zone_from_file(
             dns.name.from_text(NSEC_ZONE_NAME), "signer-nsec.test/zonefile")
     finally:
         os.chdir(cwd)
@@ -137,7 +146,7 @@ def _inject_deleg_matrix(zone, zone_name):
     import dns.rdata
     deleg_wire = (r"\# 26 "
                   "00000a636f6e66696731323334076578616d706c6503636f6d00")
-    deleg = dnssec_util.RRtype.DELEG
+    deleg = adns.zone.RRtype.DELEG
 
     def add(owner, rdtype, text):
         name = dns.name.from_text(owner + "." + zone_name + ".")
@@ -157,7 +166,7 @@ def _sign_with_deleg(zone_name, keysubdir, jitter=0):
     cwd = os.getcwd()
     os.chdir(ZONE_DIR)
     try:
-        zone = dnssec_util.zone_from_file(
+        zone = adns.zone.zone_from_file(
             dns.name.from_text(zone_name), keysubdir + "/zonefile")
     finally:
         os.chdir(cwd)
@@ -188,7 +197,7 @@ def test_fixture_shape():
 
 def _signzone():
     import importlib
-    return importlib.import_module("signzone")
+    return importlib.import_module("adns.signer")
 
 
 def test_parse_duration_units():
@@ -350,7 +359,7 @@ def test_deleg_signed_at_cut():
     # signed and its type appears in the delegation-point NSEC bitmap, exactly
     # like DS. NS is not signed. A DELEG-only cut (no NS) still occludes its
     # subtree.
-    deleg = dnssec_util.RRtype.DELEG
+    deleg = adns.zone.RRtype.DELEG
     zone, _keys = _sign_with_deleg(NSEC_ZONE_NAME, "signer-nsec.test")
     # DELEG-only cut: DELEG + NSEC signed, DELEG bit in the bitmap.
     donly = dns.name.from_text("delegonly." + NSEC_ZONE_NAME + ".")
@@ -391,11 +400,11 @@ def test_wildcard_deleg_fails_fast():
     sz.strip_dnssec(zone)
     # Plant a DELEG RRset at a wildcard owner.
     star = dns.name.from_text("*.bad." + NSEC_ZONE_NAME + ".")
-    rdata = dns.rdata.from_text(dns.rdataclass.IN, dnssec_util.RRtype.DELEG,
+    rdata = dns.rdata.from_text(dns.rdataclass.IN, adns.zone.RRtype.DELEG,
                                 r"\# 26 "
                                 "00000a636f6e66696731323334076578616d706c65"
                                 "03636f6d00")
-    zone.find_rdataset(star, dnssec_util.RRtype.DELEG,
+    zone.find_rdataset(star, adns.zone.RRtype.DELEG,
                        create=True).add(rdata, 3600)
     now = 1_700_000_000
     with pytest.raises(sz.SignerError, match="4.4"):
@@ -497,7 +506,7 @@ def _load_nsec3_fixture():
     cwd = os.getcwd()
     os.chdir(ZONE_DIR)
     try:
-        return dnssec_util.zone_from_file(
+        return adns.zone.zone_from_file(
             dns.name.from_text(NSEC3_ZONE_NAME), "signer-nsec3.test/zonefile")
     finally:
         os.chdir(cwd)
@@ -528,7 +537,7 @@ def _nsec3_records(zone):
 def _hashed(zone, name):
     """Hashed owner name for `name` under the fixture's NSEC3PARAM."""
     params = zone.get_rdataset(zone.origin, dns.rdatatype.NSEC3PARAM)[0]
-    h = dnssec_util.nsec3hash(name, params.algorithm, params.salt,
+    h = adns.zone.nsec3hash(name, params.algorithm, params.salt,
                               params.iterations)
     return dns.name.Name((h.encode(),) + zone.origin.labels)
 
@@ -623,7 +632,7 @@ def test_nsec3_deleg_signed_at_cut():
     # DELEG at a cut is signed and its type appears in the delegation-point
     # NSEC3 bitmap (mirrors the NSEC-mode test). The DELEG-only cut occludes its
     # subtree.
-    deleg = dnssec_util.RRtype.DELEG
+    deleg = adns.zone.RRtype.DELEG
     zone, _keys = _sign_with_deleg(NSEC3_ZONE_NAME, "signer-nsec3.test")
     n3 = _nsec3_records(zone)
     donly = dns.name.from_text("delegonly." + NSEC3_ZONE_NAME + ".")
@@ -686,7 +695,7 @@ def _sign_2key_fixture(jitter=0):
     cwd = os.getcwd()
     os.chdir(ZONE_DIR)
     try:
-        zone = dnssec_util.zone_from_file(
+        zone = adns.zone.zone_from_file(
             dns.name.from_text(TWOKEY_ZONE_NAME), "signer-2key.test/zonefile")
     finally:
         os.chdir(cwd)
@@ -742,7 +751,7 @@ def _sign_2key_one_pem(keydir, jitter=0):
     cwd = os.getcwd()
     os.chdir(ZONE_DIR)
     try:
-        zone = dnssec_util.zone_from_file(
+        zone = adns.zone.zone_from_file(
             dns.name.from_text(TWOKEY_ZONE_NAME), "signer-2key.test/zonefile")
     finally:
         os.chdir(cwd)

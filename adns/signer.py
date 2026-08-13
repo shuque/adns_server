@@ -36,9 +36,9 @@ import dns.dnssec
 import dns.exception
 from dns.rdtypes.dnskeybase import SEP
 
-from dnssec_util import (
-    zone_from_file, load_private_key, key_basename,
-    make_nsec_rrset, make_nsec3_rrset, nsec3hash, AUTH_IN_PARENT_RRTYPES)
+from adns.crypto import load_private_key, key_basename
+from adns.zone import zone_from_file, make_nsec_rrset, make_nsec3_rrset, nsec3hash
+from adns.constants import AUTH_IN_PARENT_RRTYPES
 
 
 class SignerError(Exception):
@@ -436,7 +436,7 @@ def sign_zone(zone, keys, inception, base_expiration, jitter):
 
 
 def make_arg_parser():
-    """Build the signzone.py argument parser (Signer.md §2)."""
+    """Build the signzone argument parser (Signer.md §2)."""
     parser = argparse.ArgumentParser(
         description="Offline DNSSEC zone signer (NSEC/NSEC3, KSK/ZSK or CSK).")
     parser.add_argument("zonename", help="zone origin (e.g. example.com)")

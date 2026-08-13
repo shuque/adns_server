@@ -35,12 +35,19 @@ import dns.rdatatype
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__),
                                                  "..", "..")))
-import adns_server as adns   # noqa: E402
+from adns.config import Preferences, PROGNAME   # noqa: E402
+import adns.server as adns_server_module   # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-SERVER = os.path.join(REPO_ROOT, "adns_server.py")
 ZONE_DIR = os.path.join(HERE, "test_zones")
+
+# `-m adns` is a package import that a subprocess cannot resolve on its own --
+# sys.path.insert(0, REPO_ROOT) above only affects this process, not a child.
+# Put the repo root on the child's PYTHONPATH explicitly.
+SUBPROCESS_ENV = {**os.environ,
+                  "PYTHONPATH": REPO_ROOT + os.pathsep +
+                  os.environ.get("PYTHONPATH", "")}
 
 
 # --------------------------------------------------------------------------
@@ -49,40 +56,41 @@ ZONE_DIR = os.path.join(HERE, "test_zones")
 
 def test_get_pid_file_explicit():
     """An explicit pidfile preference wins over everything else."""
-    prefs = adns.Preferences()
+    prefs = Preferences()
     prefs.pidfile = "/var/run/custom.pid"
     prefs.workdir = "/some/workdir"
-    assert adns.get_pid_file(prefs) == "/var/run/custom.pid"
+    assert adns_server_module.get_pid_file(prefs) == "/var/run/custom.pid"
 
 
 def test_get_pid_file_workdir():
     """With no explicit pidfile, it lands in the working directory."""
-    prefs = adns.Preferences()
+    prefs = Preferences()
     prefs.pidfile = None
     prefs.workdir = "/some/workdir"
-    assert adns.get_pid_file(prefs) == os.path.join("/some/workdir",
-                                                    "daemon.pid")
+    assert adns_server_module.get_pid_file(prefs) == os.path.join(
+        "/some/workdir", "daemon.pid")
 
 
 def test_get_pid_file_fallback():
     """With neither pidfile nor workdir set, it falls back to /tmp."""
-    prefs = adns.Preferences()
+    prefs = Preferences()
     prefs.pidfile = None
     prefs.workdir = None
-    assert adns.get_pid_file(prefs) == f"/tmp/{adns.PROGNAME}.pid"
+    assert adns_server_module.get_pid_file(prefs) == f"/tmp/{PROGNAME}.pid"
 
 
 def test_remove_pidfile_removes_existing(tmp_path):
     """remove_pidfile unlinks a file that is present."""
     pidfile = tmp_path / "daemon.pid"
     pidfile.write_text("12345\n")
-    adns.remove_pidfile(str(pidfile))
+    adns_server_module.remove_pidfile(str(pidfile))
     assert not pidfile.exists()
 
 
 def test_remove_pidfile_missing_is_silent(tmp_path):
     """A missing pidfile is tolerated (FileNotFoundError swallowed)."""
-    adns.remove_pidfile(str(tmp_path / "does-not-exist.pid"))  # must not raise
+    adns_server_module.remove_pidfile(str(tmp_path / "does-not-exist.pid"))
+    # must not raise
 
 
 def test_remove_pidfile_logs_other_errors(tmp_path, monkeypatch):
@@ -90,15 +98,21 @@ def test_remove_pidfile_logs_other_errors(tmp_path, monkeypatch):
 
     This is the exact silent-swallow that hid the v0.7.6 privilege-drop
     unlink failure. We simulate an EACCES by making os.remove raise it and
-    assert the message reaches log_message rather than propagating."""
+    assert the message reaches log_message rather than propagating.
+
+    remove_pidfile() itself lives in adns.server (Task 7), so its
+    log_message call resolves through adns.server's own module globals --
+    patching a different module's name binding of the same function would
+    not intercept it."""
     logged = []
-    monkeypatch.setattr(adns, "log_message", logged.append)
+    monkeypatch.setattr(adns_server_module, "log_message", logged.append)
 
     def _boom(_path):
         raise PermissionError(13, "Permission denied")
-    monkeypatch.setattr(adns.os, "remove", _boom)
+    monkeypatch.setattr(adns_server_module.os, "remove", _boom)
 
-    adns.remove_pidfile(str(tmp_path / "daemon.pid"))   # must not raise
+    adns_server_module.remove_pidfile(str(tmp_path / "daemon.pid"))
+    # must not raise
     assert logged and "could not remove pidfile" in logged[0]
 
 
@@ -116,7 +130,7 @@ def test_close_inherited_fds_subprocess():
     child = textwrap.dedent(f"""
         import os, sys
         sys.path.insert(0, {REPO_ROOT!r})
-        import adns_server as adns
+        import adns.server as adns
 
         # Open a real fd we know is >= 3.
         fd = os.open(os.devnull, os.O_RDWR)
@@ -226,9 +240,9 @@ def test_daemon_lifecycle(tmp_path):
     # No -f: the server daemonizes. -d for verbose logging (goes to syslog once
     # daemonized, so we don't capture it here).
     with subprocess.Popen(
-            [sys.executable, SERVER, "-c", str(config),
+            [sys.executable, "-m", "adns", "-c", str(config),
              "-s", "127.0.0.1", "-p", str(port), "-d"],
-            cwd=ZONE_DIR, stdout=subprocess.DEVNULL,
+            cwd=ZONE_DIR, env=SUBPROCESS_ENV, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL) as proc:
         # The launcher (first-fork parent) detaches and exits 0 promptly.
         assert proc.wait(timeout=10) == 0
@@ -273,9 +287,9 @@ def test_daemon_pidfile_guard(tmp_path):
     config = _write_daemon_config(tmp_path, port, str(pidfile))
 
     with subprocess.Popen(
-            [sys.executable, SERVER, "-c", str(config),
+            [sys.executable, "-m", "adns", "-c", str(config),
              "-s", "127.0.0.1", "-p", str(port), "-d"],
-            cwd=ZONE_DIR, stdout=subprocess.DEVNULL,
+            cwd=ZONE_DIR, env=SUBPROCESS_ENV, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL) as proc:
         # The existence check runs before the first fork, so this is the real
         # process exit code, not a detached launcher's.

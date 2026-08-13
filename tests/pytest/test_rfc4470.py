@@ -28,10 +28,10 @@ import dns.zone
 
 import dnsutil as du
 
-# Import the server module from the repository root (direct-import modality).
+# Import the zone module from the repository root (direct-import modality).
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..")))
-import adns_server as adns   # noqa: E402
+import adns.zone as adns   # noqa: E402
 
 ZONE = "whitelies.test"
 

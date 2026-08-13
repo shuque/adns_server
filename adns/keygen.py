@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from dns.rdtypes.dnskeybase import SEP
 
-from dnssec_util import key_basename
+from adns.crypto import key_basename
 
 
 ECDSA_CURVE = ec.SECP256R1()
@@ -43,7 +43,7 @@ def process_arguments():
                         help="write keytag-named .pem/.dnskey/.ds triple here")
     parser.add_argument("--prepublish", action="store_true",
                         help="write the private key as .prepublish.pem so the "
-                             "DNSKEY can be pre-published while signzone.py "
+                             "DNSKEY can be pre-published while signzone "
                              "ignores it until it is renamed to .pem (requires "
                              "-K)")
     return parser.parse_args()
@@ -82,7 +82,7 @@ def build_dnskey_rrset(zone, dnskey_rdata):
     return rrset
 
 
-def write_key_triple(keydir, zone, algorithm, keytag, private_key,
+def write_key_triple(keydir, zone, algorithm, keytag, private_key,  # pylint: disable=too-many-positional-arguments
                      dnskey_rrset, ds_rr, prepublish=False):
     """
     Write <basename>.pem/.dnskey into keydir, plus <basename>.ds when ds_rr is
@@ -93,7 +93,7 @@ def write_key_triple(keydir, zone, algorithm, keytag, private_key,
     common operator practice.
 
     When prepublish is true the private key is written as
-    <basename>.prepublish.pem instead of <basename>.pem, so signzone.py's
+    <basename>.prepublish.pem instead of <basename>.pem, so signzone's
     exact-match key discovery ignores it (the DNSKEY is published but not used
     to sign) until an operator activates it by renaming to <basename>.pem. The
     .dnskey and .ds companions are written unchanged.
@@ -115,20 +115,21 @@ def write_key_triple(keydir, zone, algorithm, keytag, private_key,
     return basename
 
 
-if __name__ == '__main__':
+def main():
+    """CLI entry point."""
 
-    CONFIG = process_arguments()
-    if CONFIG.prepublish and not CONFIG.keydir:
-        raise SystemExit("adnskeygen.py: --prepublish requires -K/--keydir")
-    ZONE = dns.name.from_text(CONFIG.zone)
+    config = process_arguments()
+    if config.prepublish and not config.keydir:
+        raise SystemExit("adnskeygen: --prepublish requires -K/--keydir")
+    zone = dns.name.from_text(config.zone)
 
-    PRIVATE_KEY, PUBLIC_KEY = generate_key(CONFIG.algorithm)
+    private_key, public_key = generate_key(config.algorithm)
     print("### Private Key file contents:")
-    print(pem_data_for_private_key(PRIVATE_KEY))
+    print(pem_data_for_private_key(private_key))
 
-    dnskey_rdata = dns.dnssec.make_dnskey(PUBLIC_KEY,
-                                          CONFIG.algorithm,
-                                          CONFIG.flags,
+    dnskey_rdata = dns.dnssec.make_dnskey(public_key,
+                                          config.algorithm,
+                                          config.flags,
                                           PROTOCOL)
     print("### DNSKEY RDATA:")
     print(dnskey_rdata)
@@ -136,27 +137,31 @@ if __name__ == '__main__':
     print("### DNSKEY keytag:", keytag)
     print('')
 
-    DNSKEY_RRSET = build_dnskey_rrset(ZONE, dnskey_rdata)
+    dnskey_rrset = build_dnskey_rrset(zone, dnskey_rdata)
     print("### DNSKEY RRset:")
-    print(DNSKEY_RRSET)
+    print(dnskey_rrset)
     print('')
 
     # DS is only emitted for SEP keys (KSK/CSK): a plain ZONE-flag key (ZSK) is
     # not a secure entry point in common operator practice, so no DS is useful.
     # (SEP is advisory, so a ZSK *could* be secured by a DS in the parent; if
     # ever needed, its DS is easy to derive separately from the DNSKEY.)
-    ds = (dns.dnssec.make_ds(ZONE, dnskey_rdata, algorithm=2)
-          if CONFIG.flags & SEP else None)
+    ds = (dns.dnssec.make_ds(zone, dnskey_rdata, algorithm=2)
+          if config.flags & SEP else None)
     if ds is not None:
         print("### DS record")
         print(ds)
 
-    if CONFIG.keydir:
-        BASENAME = write_key_triple(CONFIG.keydir, ZONE, CONFIG.algorithm,
-                                    keytag, PRIVATE_KEY, DNSKEY_RRSET, ds,
-                                    prepublish=CONFIG.prepublish)
-        PEM_SUFFIX = "prepublish.pem" if CONFIG.prepublish else "pem"
-        FILES = f"{{{PEM_SUFFIX},dnskey,ds}}" if ds is not None \
-            else f"{{{PEM_SUFFIX},dnskey}}"
+    if config.keydir:
+        basename = write_key_triple(config.keydir, zone, config.algorithm,
+                                    keytag, private_key, dnskey_rrset, ds,
+                                    prepublish=config.prepublish)
+        pem_suffix = "prepublish.pem" if config.prepublish else "pem"
+        files = f"{{{pem_suffix},dnskey,ds}}" if ds is not None \
+            else f"{{{pem_suffix},dnskey}}"
         print('')
-        print(f"### Wrote key files: {BASENAME}.{FILES}")
+        print(f"### Wrote key files: {basename}.{files}")
+
+
+if __name__ == '__main__':
+    main()

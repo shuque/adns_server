@@ -42,15 +42,23 @@ Homepage = "https://github.com/shuque/check_zone_dnssec"
 Issues = "https://github.com/shuque/check_zone_dnssec/issues"
 
 [tool.setuptools]
-py-modules = ["dnssec_util"]
-script-files = ['adns_server.py', 'adnskeygen.py', 'signzone.py']
+packages = ["adns"]
+# No top-level legacy modules remain: dnssec_util.py, signzone.py, and
+# adnskeygen.py were retired in Task 9 (moved into the adns package, or
+# deleted); adns_server.py itself was retired in Task 8.
+py-modules = []
+
+[project.scripts]
+adns-server = "adns.__main__:main"
+signzone = "adns.signer:main"
+adnskeygen = "adns.keygen:main"
 
 [tool.setuptools.dynamic]
-version = {attr = "adns_server.__version__"}
+version = {attr = "adns.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests/pytest"]
 markers = [
-    "signer: offline zone signer (signzone.py) tests -- no running server",
+    "signer: offline zone signer (adns.signer) tests -- no running server",
     "deleg: DELEG delegation-extension behavior tests",
 ]

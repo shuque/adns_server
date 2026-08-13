@@ -112,6 +112,8 @@ disable=
     fixme,
     consider-using-assignment-expr,
     possibly-used-before-assignment,
+    # Shipped code targets Python 3.9: use Optional[X], not the 3.10+ X | None.
+    consider-alternative-union-syntax,
 
 
 [REPORTS]

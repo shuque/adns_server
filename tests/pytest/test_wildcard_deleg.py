@@ -19,10 +19,11 @@ import pytest
 import dns.name
 import dns.zone
 
-# Import the server module from the repository root.
+# Import the package modules from the repository root.
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..")))
-import adns_server as adns   # noqa: E402
+from adns.config import Preferences, make_single_zone   # noqa: E402
+from adns.zone import Zone   # noqa: E402
 
 pytestmark = pytest.mark.deleg
 
@@ -40,7 +41,7 @@ def _zone(records):
             "@ IN NS ns\n"
             + "\n".join(records) + "\n")
     return dns.zone.from_text(text, origin="wild.test.",
-                              zone_factory=adns.Zone, relativize=False)
+                              zone_factory=Zone, relativize=False)
 
 
 def test_wildcard_deleg_is_rejected():
@@ -96,7 +97,7 @@ def _write_zone(tmp_path):
 
 def test_load_aborts_on_wildcard_deleg(tmp_path):
     """A zone with a wildcard DELEG aborts startup (SystemExit)."""
-    prefs = adns.Preferences()
+    prefs = Preferences()
     config = {"file": _write_zone(tmp_path)}
     with pytest.raises(SystemExit):
-        adns.make_single_zone(prefs, dns.name.from_text("wild.test."), config)
+        make_single_zone(prefs, dns.name.from_text("wild.test."), config)

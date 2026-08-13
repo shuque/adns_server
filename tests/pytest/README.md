@@ -1,7 +1,7 @@
 # Automated test suite for adns_server
 
 An automated, self-contained pytest suite that launches a private instance of
-`adns_server.py` and drives it with real DNS queries, asserting on the
+`adns` (`python3 -m adns`) and drives it with real DNS queries, asserting on the
 semantics of the responses (rcode, flags, sections, EDE codes) and, for signed
 zones, **cryptographically validating** the DNSSEC signatures and NSEC/NSEC3
 proofs.
@@ -53,6 +53,7 @@ startup failure.
 - `nsec3.test` — NSEC3, DELEG enabled. Has a DELEG-only cut (`degonly`).
 - `unsigned.test` — unsigned, DELEG enabled.
 
-To regenerate a zone's key (if ever needed), see `adnskeygen.py` in the repo root;
-the suite's keys live under `test_zones/<zone>/privkey.pem` with the matching
+To regenerate a zone's key (if ever needed), see `adns/keygen.py` (installed as
+the `adnskeygen` console script, or run as `python3 -m adns.keygen`); the
+suite's keys live under `test_zones/<zone>/privkey.pem` with the matching
 DNSKEY in `dnskey.txt`.
