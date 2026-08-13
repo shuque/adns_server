@@ -96,7 +96,7 @@ pip3 install git+https://github.com/shuque/adns_server.git
 ```
 
 To install a specific released version, append the tag, e.g.
-`...adns_server.git@v0.12.0`.
+`...adns_server.git@v0.12.1`.
 
 For development, install in editable mode from a local checkout so that the
 console scripts (`adns-server`, `signzone`, `adnskeygen`) point back at your
@@ -222,6 +222,30 @@ example.com. 7200 IN DNSKEY 257 3 13 oBQvOkuVPdp7Wes6EcWra7UlyI3u9EeM nRd79CSmq4
 ### DS record
 56959 13 2 ac2c59edcb0d9021d6898e2824cd63fd67c3d8c0b6da69943121b5b5263bdbad
 ```
+
+## Generating DELEG / DELEGPARAM Records
+
+The package includes a console script, `deleg-rdata` (`adns/deleg_rdata.py`,
+also runnable as `python3 -m adns.deleg_rdata`), that generates a DELEG or
+DELEGPARAM resource record in RFC 3597 generic (`\#`) presentation format from
+a set of DelegInfo `key=value` pairs. The RDATA is the DelegInfos list of
+draft-ietf-deleg Section 3, which reuses the SVCB SvcParams wire encoding
+(RFC 9460). The reusable codec lives in the `adns.deleg` library module.
+
+```
+$ deleg-rdata child.example. server-ipv4=192.0.2.1 server-ipv6=2001:db8::1
+child.example. IN TYPE61440 \# 28 00010004c00002010002001020010db8000000000000000000000001
+
+$ deleg-rdata --type DELEGPARAM -v cfg.example. \
+              server-name=ns1.example.,ns2.example.
+cfg.example. IN TYPE65433 \# ...
+```
+
+Use `--type DELEGPARAM` (default is `DELEG`) or a numeric type code, `--ttl` to
+include a TTL, `--origin` to resolve relative names in
+`server-name`/`include-delegparam` values, `--strict` to treat Section 3.4/3.5
+semantic violations as errors instead of warnings, and `-v` for an octet-level
+breakdown of the RDATA on stderr.
 
 ## Testing
 

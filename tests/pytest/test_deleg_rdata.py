@@ -8,10 +8,8 @@ key registry and value codecs, and checks the Section 3.4/3.5 validators.
 """
 
 import io
-import os
 import socket
 import struct
-import sys
 
 import pytest
 
@@ -19,10 +17,7 @@ import dns.name
 import dns.rdata
 import dns.rdataclass
 
-# Import the tool from the repository root.
-sys.path.insert(0, os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..")))
-import deleg_rdata as dr   # noqa: E402
+from adns import deleg as dr
 
 pytestmark = pytest.mark.deleg
 
