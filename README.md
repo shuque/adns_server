@@ -98,6 +98,25 @@ pip3 install git+https://github.com/shuque/adns_server.git
 To install a specific released version, append the tag, e.g.
 `...adns_server.git@v0.12.0`.
 
+For development, install in editable mode from a local checkout so that the
+console scripts (`adns-server`, `signzone`, `adnskeygen`) point back at your
+working tree and pick up edits without reinstalling:
+
+```
+pip3 install -e .
+```
+
+Installing into a virtualenv does not require activating it first: invoking
+the venv's interpreter directly (e.g. `/path/to/venv/bin/python3 -m pip
+install -e .`) installs into that environment regardless. Activation
+(`. /path/to/venv/bin/activate`) only puts the venv's `bin/` on your `PATH` —
+so activate the environment (or use the full path to each script) before
+running the installed `adns-server`/`signzone`/`adnskeygen` commands.
+
+Without any install, the entry points can also be run directly from the repo
+as modules: `python3 -m adns`, `python3 -m adns.signer`, `python3 -m
+adns.keygen`.
+
 ### Usage
 
 ```
