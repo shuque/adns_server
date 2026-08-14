@@ -32,9 +32,25 @@ def test_edns_version_zero(query):
 
 
 def test_meta_qtype_refused(query):
-    """A meta/query-only RR type (e.g. NXNAME=128) is a FORMERR."""
+    """
+    An explicit query for a meta/query-only RR type (e.g. the NXNAME=128
+    pseudo-type) is FORMERR, and with EDNS also carries EDE 30 (Invalid Query
+    Type). RFC 9824 section 3.5.
+    """
     r = query("deleg.test", "TYPE128", do=True)
     assert du.rcode(r) == "FORMERR"
+    assert 30 in du.ede_codes(r)          # EDECode.INVALID_QTYPE
+
+
+def test_meta_qtype_refused_no_edns(query):
+    """
+    Without EDNS the meta-type query is still FORMERR, but there is no OPT to
+    carry an EDE, so no Extended DNS Error is present.
+    """
+    r = query("deleg.test", "TYPE128", want_edns=False)
+    assert du.rcode(r) == "FORMERR"
+    assert r.edns == -1                    # response has no OPT
+    assert du.ede_codes(r) == set()
 
 
 def test_any_query_conventional(query):
