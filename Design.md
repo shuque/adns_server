@@ -361,6 +361,26 @@ covering-next-name form (`owner` → `owner\000`) is triggered by NS **or** DELE
 at the cut, so a DELEG-only cut gets the same covering NSEC a classic NS
 delegation would.
 
+### 5.4 Supported signature algorithms
+
+The **key-generation tool (`adnskeygen`, §9) is restricted to algorithms 8
+(RSASHA256), 13 (ECDSAP256SHA256), and 15 (ED25519)** — the set marked
+RECOMMENDED for signing in the IANA DNSSEC Algorithm Numbers registry. ECDSA/
+EdDSA remain the natural choice for online signing (cheap public-key
+operations); RSASHA256 is supported primarily for precomputed offline
+signatures and interoperability with the large installed base of RSA-signed
+zones. For algorithm 8 the RSA modulus is set by `adnskeygen -b/--bits`
+(default and floor 1280 bits — deliberately small so NSEC3 negative responses
+stay under the common Internet path-MTU and avoid fragmentation/TCP retry).
+
+**Serving and online signing impose no algorithm allowlist.** The serving path
+emits DNSKEY/RRSIG/NSEC(3) rdata opaquely, and online signing delegates hash
+selection to `dns.dnssec.sign()` via the DNSKEY's algorithm. So any signature
+algorithm whose keys or precomputed signatures are present and supported by the
+underlying dnspython and `cryptography` packages will be served (and, if a
+matching private key is configured, online-signed) correctly — independent of
+`adnskeygen`'s narrower generation set.
+
 ---
 
 ## 6. Network and runtime

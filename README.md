@@ -96,7 +96,7 @@ pip3 install git+https://github.com/shuque/adns_server.git
 ```
 
 To install a specific released version, append the tag, e.g.
-`...adns_server.git@v0.12.1`.
+`...adns_server.git@v0.13.0`.
 
 For development, install in editable mode from a local checkout so that the
 console scripts (`adns-server`, `signzone`, `adnskeygen`) point back at your
@@ -185,14 +185,17 @@ tool.
 
 ```
 $ adnskeygen -h
-usage: adnskeygen [-h] [-a N] [-f N] [-K DIR] [--prepublish] zone
+usage: adnskeygen [-h] [-a N] [-b N] [-f N] [-K DIR] [--prepublish] zone
 
 positional arguments:
   zone                  DNS zone name
 
 options:
   -h, --help            show this help message and exit
-  -a N                  DNSSEC algorithm number (default: 13)
+  -a N                  DNSSEC algorithm number: 8 (RSASHA256),
+                        13 (ECDSAP256SHA256), 15 (ED25519) (default: 13)
+  -b N, --bits N        RSA key size in bits for algorithm 8; ignored for
+                        13/15 (default: 1280, minimum: 1280)
   -f N                  Value of DNSKEY flags field (default: 257)
   -K DIR, --keydir DIR  write keytag-named .pem/.dnskey/.ds triple here
   --prepublish          write the private key as .prepublish.pem so the
@@ -222,6 +225,15 @@ example.com. 7200 IN DNSKEY 257 3 13 oBQvOkuVPdp7Wes6EcWra7UlyI3u9EeM nRd79CSmq4
 ### DS record
 56959 13 2 ac2c59edcb0d9021d6898e2824cd63fd67c3d8c0b6da69943121b5b5263bdbad
 ```
+
+`adnskeygen` generates keys for algorithms 8 (RSASHA256), 13 (ECDSAP256SHA256),
+and 15 (ED25519) — the set marked RECOMMENDED for signing in the IANA DNSSEC
+Algorithm Numbers registry. For algorithm 8, `-b/--bits` sets the RSA modulus
+(default and minimum 1280 bits; a small default keeps NSEC3 negative responses
+under the common path-MTU). The server itself imposes no algorithm allowlist
+for serving or online signing: it serves zones pre-signed with any algorithm
+supported by dnspython/`cryptography` (e.g. RSA zones signed by BIND's
+`dnssec-signzone`) and can online-sign with algorithm 8 as well.
 
 ## Generating DELEG / DELEGPARAM Records
 
