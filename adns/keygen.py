@@ -17,12 +17,16 @@ import dns.rdatatype
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.asymmetric import rsa
 from dns.rdtypes.dnskeybase import SEP
 
 from adns.crypto import key_basename
 
 
 ECDSA_CURVE = ec.SECP256R1()
+RSA_BITS_FLOOR = 1280
+RSA_BITS_DEFAULT = 1280
+RSA_PUBLIC_EXPONENT = 65537
 PROTOCOL = 3
 TTL = 7200
 
@@ -34,8 +38,15 @@ def process_arguments():
     parser.add_argument("zone", help="DNS zone name")
     parser.add_argument("-a", type=int, dest='algorithm', metavar='N',
                         default=13,
-                        choices=[13, 15],
-                        help="DNSSEC algorithm number (default: %(default)d)")
+                        choices=[8, 13, 15],
+                        help="DNSSEC algorithm number: 8 (RSASHA256), "
+                             "13 (ECDSAP256SHA256), 15 (ED25519) "
+                             "(default: %(default)d)")
+    parser.add_argument("-b", "--bits", type=int, metavar='N',
+                        default=RSA_BITS_DEFAULT,
+                        help="RSA key size in bits for algorithm 8; ignored "
+                             f"for 13/15 (default: %(default)d, "
+                             f"minimum: {RSA_BITS_FLOOR})")
     parser.add_argument("-f", type=int, dest='flags', metavar='N',
                         default=257,
                         help="Value of DNSKEY flags field (default: %(default)d)")
@@ -49,10 +60,20 @@ def process_arguments():
     return parser.parse_args()
 
 
-def generate_key(algorithm):
-    """Generate DNSSEC key for given algorithm"""
+def generate_key(algorithm, bits=RSA_BITS_DEFAULT):
+    """
+    Generate DNSSEC key for given algorithm.
 
-    if algorithm == 13:
+    For algorithm 8 (RSASHA256), bits sets the RSA modulus size (minimum
+    RSA_BITS_FLOOR); bits is ignored for 13/15, which have fixed key sizes.
+    """
+    if algorithm == 8:
+        if bits < RSA_BITS_FLOOR:
+            raise ValueError(
+                f"RSA key size {bits} below minimum {RSA_BITS_FLOOR} bits")
+        private_key = rsa.generate_private_key(
+            public_exponent=RSA_PUBLIC_EXPONENT, key_size=bits)
+    elif algorithm == 13:
         private_key = ec.generate_private_key(ECDSA_CURVE)
     elif algorithm == 15:
         private_key = ed25519.Ed25519PrivateKey.generate()
@@ -123,7 +144,10 @@ def main():
         raise SystemExit("adnskeygen: --prepublish requires -K/--keydir")
     zone = dns.name.from_text(config.zone)
 
-    private_key, public_key = generate_key(config.algorithm)
+    try:
+        private_key, public_key = generate_key(config.algorithm, config.bits)
+    except ValueError as exc:
+        raise SystemExit(f"adnskeygen: {exc}") from exc
     print("### Private Key file contents:")
     print(pem_data_for_private_key(private_key))
 

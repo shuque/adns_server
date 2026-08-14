@@ -815,3 +815,114 @@ def test_2key_signed_rrsets_validate():
                                 now=1_700_000_000)
             checked += 1
     assert checked >= 6
+
+
+import adns.keygen    # noqa: E402
+
+
+def test_generate_key_alg8_default_bits():
+    """generate_key(8) yields a 1280-bit RSA key whose DNSKEY has algorithm 8."""
+    priv, pub = adns.keygen.generate_key(8)
+    assert priv.key_size == 1280
+    dnskey = dns.dnssec.make_dnskey(pub, 8, 257, 3)
+    assert dnskey.algorithm == 8
+
+
+def test_generate_key_alg8_custom_bits():
+    priv, _pub = adns.keygen.generate_key(8, bits=1536)
+    assert priv.key_size == 1536
+
+
+def test_generate_key_alg8_below_floor_raises():
+    with pytest.raises(ValueError):
+        adns.keygen.generate_key(8, bits=1024)
+
+
+def test_generate_key_bits_ignored_for_ec():
+    """bits is irrelevant for 13/15; passing a sub-floor value still succeeds."""
+    priv, _pub = adns.keygen.generate_key(13, bits=1024)
+    assert priv is not None
+
+
+def test_generate_key_alg8_pem_roundtrips(tmp_path):
+    """An alg-8 PEM written by keygen loads back through crypto.load_private_key."""
+    priv, _pub = adns.keygen.generate_key(8)
+    pem_path = tmp_path / "rsa.pem"
+    pem_path.write_text(adns.keygen.pem_data_for_private_key(priv))
+    loaded = adns.crypto.load_private_key(str(pem_path))
+    assert loaded.key_size == 1280
+
+
+def test_adnskeygen_cli_alg8_writes_triple(tmp_path):
+    """adnskeygen -a 8 -b 1280 writes a +008+ key triple that loads."""
+    keydir = tmp_path / "keys"
+    result = subprocess.run(
+        GENKEY + ["rsa.test", "-a", "8", "-b", "1280", "-f", "257",
+                  "--keydir", str(keydir)],
+        capture_output=True, text=True, check=True, env=SUBPROCESS_ENV)
+    pems = list(keydir.glob("rsa.test+008+*.pem"))
+    assert len(pems) == 1, result.stdout
+    key = adns.crypto.load_private_key(str(pems[0]))
+    assert key.key_size == 1280
+
+
+def test_adnskeygen_cli_rejects_alg_rsasha1():
+    """argparse choices reject an algorithm outside {8,13,15} (e.g. 5)."""
+    result = subprocess.run(
+        GENKEY + ["x.test", "-a", "5"],
+        capture_output=True, text=True, check=False, env=SUBPROCESS_ENV)
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr
+
+
+def test_adnskeygen_cli_below_floor_clean_error():
+    """
+    adnskeygen -a 8 -b <below-floor> gives a clean error, not a Python traceback.
+    """
+    result = subprocess.run(
+        GENKEY + ["rsa.test", "-a", "8", "-b", "512"],
+        capture_output=True, text=True, check=False, env=SUBPROCESS_ENV)
+    assert result.returncode != 0
+    assert "adnskeygen:" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+import adns.signer    # noqa: E402
+
+
+def test_alg8_signatures_validate_offline_and_online():
+    """
+    An alg-8 key signs an RRset via both the offline (signer.rrsig_rdata) and
+    online (crypto.sign_rrset) paths, and dns.dnssec.validate accepts both.
+    Proves the unchanged signing/serving code already supports RSASHA256.
+    """
+    import time
+    import dns.name
+    import dns.rrset
+    import dns.dnssec
+    from adns.zone import HashableRRset
+
+    priv, pub = adns.keygen.generate_key(8)
+    origin = dns.name.from_text("rsa.test.")
+    dnskey = dns.dnssec.make_dnskey(pub, 8, 257, 3)
+    dnskey_rrset = dns.rrset.from_text_list(
+        origin, 7200, "IN", "DNSKEY", [dnskey.to_text()])
+    rrset = dns.rrset.from_text("www.rsa.test.", 3600, "IN", "A", "192.0.2.1")
+    keyring = {origin: dnskey_rrset}
+
+    # Offline path.
+    now = int(time.time())
+    off_sig = adns.signer.rrsig_rdata(rrset, priv, origin, dnskey,
+                                      now - 3600, now + 172800)
+    off_rrsig = dns.rrset.from_rdata(rrset.name, 3600, off_sig)
+    dns.dnssec.validate(rrset, off_rrsig, keyring)
+
+    # Online path via crypto.sign_rrset, using a minimal zone stand-in.
+    class _Zone:
+        pass
+    z = _Zone()
+    z.privatekey = priv
+    z.origin = origin
+    z.signing_dnskey = dnskey
+    on_rrsig = adns.crypto.sign_rrset(z, HashableRRset(rrset))
+    dns.dnssec.validate(rrset, on_rrsig, keyring)
