@@ -208,6 +208,64 @@ def mldsa_servers(tmp_path_factory):
         yield {"large": large, "capped": capped, "pub": pub}
 
 
+@pytest.fixture(scope="session")
+def mldsa_online_server(tmp_path_factory):
+    """
+    Serve an algorithm-18 (ML-DSA-44) zone with ONLINE (dynamic) signing.
+
+    Generates an alg-18 CSK and launches one dynamic_signing server over the
+    committed mldsa-online.test fixture, so the server signs every answered
+    RRset live with the shared alg-18 RRSIG builder (phase 3). No offline sign
+    step -- contrast the mldsa_servers fixture, which pre-signs.
+
+    Yields {"endpoint": (host, port), "pub": <raw 1312 octets of the ML-DSA
+    public key>}.
+    """
+    import shutil
+    import dns.rdata
+
+    tmp = tmp_path_factory.mktemp("mldsa_online")
+    keydir = tmp / "keys"
+    keydir.mkdir()
+
+    # 1. Generate the alg-18 CSK.
+    subprocess.run(
+        [sys.executable, "-m", "adns.keygen", "mldsa-online.test", "-a", "18",
+         "-f", "257", "-K", str(keydir)],
+        capture_output=True, text=True, check=True, env=SUBPROCESS_ENV)
+    dnskey_file = list(keydir.glob("mldsa-online.test+018+*.dnskey"))[0]
+    pem_file = list(keydir.glob("mldsa-online.test+018+*.pem"))[0]
+
+    # 2. Copy the committed unsigned zone in and inject the apex DNSKEY line.
+    zonefile = tmp / "zonefile"
+    shutil.copy(os.path.join(ZONE_DIR, "mldsa-online.test", "zonefile"),
+                zonefile)
+    with open(zonefile, "a", encoding="utf-8") as fobj:
+        fobj.write(dnskey_file.read_text())
+
+    # 3. Extract the raw public key (base64 field of the DNSKEY presentation).
+    dnskey_line = dnskey_file.read_text().split("DNSKEY", 1)[1].strip()
+    dnskey_rdata = dns.rdata.from_text(dns.rdataclass.IN,
+                                       dns.rdatatype.DNSKEY, dnskey_line)
+    pub = dnskey_rdata.key
+
+    # 4. Write a dynamic_signing config (absolute file + key paths).
+    config = tmp / "online.yaml"
+    config.write_text(
+        "config:\n"
+        "  edns: 4096\n"
+        "zones:\n"
+        '  - name: "mldsa-online.test"\n'
+        f'    file: "{zonefile}"\n'
+        "    dnssec: true\n"
+        "    dynamic_signing: true\n"
+        f'    private_key: "{pem_file}"\n')
+
+    # 5. Launch the server for the session.
+    with _launch_server(str(config), ".server-mldsa-online.log") as endpoint:
+        yield {"endpoint": endpoint, "pub": pub}
+
+
 def _make_query_fn(endpoint):
     """Build a query function bound to a given (host, port) endpoint."""
     host, port = endpoint

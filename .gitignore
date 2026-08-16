@@ -18,3 +18,4 @@ tests/pytest/.server.log
 tests/pytest/.server-minany.log
 tests/pytest/.server-mldsa-large.log
 tests/pytest/.server-mldsa-capped.log
+tests/pytest/.server-mldsa-online.log

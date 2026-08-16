@@ -1,0 +1,12 @@
+$TTL 86400
+$ORIGIN mldsa-online.test.
+@		IN	SOA	ns.mldsa-online.test. hostmaster.mldsa-online.test. (
+				1          ; Serial
+				43200      ; Refresh
+				3600       ; Retry
+				3628800    ; Expire
+				3600 )     ; Minimum
+		IN	NS	ns.mldsa-online.test.
+ns		IN	A	192.0.2.1
+www		IN	A	192.0.2.10
+www		IN	AAAA	2001:db8::10
