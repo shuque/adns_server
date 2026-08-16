@@ -5,4 +5,4 @@ This package is the module-split successor to the former single-file
 adns_server.py. See Design.md section 10.
 """
 
-__version__ = '0.14.0'
+__version__ = '0.15.0'

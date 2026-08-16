@@ -984,3 +984,133 @@ def test_alg8_signatures_validate_offline_and_online():
     z.signing_dnskey = dnskey
     on_rrsig = adns.crypto.sign_rrset(z, HashableRRset(rrset))
     dns.dnssec.validate(rrset, on_rrsig, keyring)
+
+
+def test_rrsig_rdata_mldsa_verifies():
+    """rrsig_rdata() signs an RRset with an alg-18 key and the RRSIG verifies.
+
+    The oracle rebuilds the RFC 4034 3.1.8.1 signing data itself and calls
+    MLDSA44PublicKey.verify() -- an independent cross-check, not a call back
+    into the production _rrsig_rdata_mldsa. dns.dnssec.validate() cannot be
+    used here because it rejects algorithm 18.
+    """
+    import base64
+    import dns.name
+    import dns.rrset
+    import dns.rdata
+    import dns.rdataclass
+    import dns.rdatatype
+    import dns.dnssec
+    import dns.rdtypes.ANY.RRSIG
+    from cryptography.hazmat.primitives.asymmetric import mldsa
+
+    sz = _signzone()
+    priv = mldsa.MLDSA44PrivateKey.generate()
+    pub = priv.public_key()
+    pub_b64 = base64.b64encode(pub.public_bytes_raw()).decode()
+    dnskey = dns.rdata.from_text(dns.rdataclass.IN, dns.rdatatype.DNSKEY,
+                                 f"257 3 18 {pub_b64}")
+    signer = dns.name.from_text("mldsa.test.")
+    rrset = dns.rrset.from_text("mldsa.test.", 3600, "IN", "MX",
+                                "10 mail.mldsa.test.")
+    inception, expiration = 1_700_000_000 - 3600, 1_700_000_000 + 2592000
+
+    rrsig = sz.rrsig_rdata(rrset, priv, signer, dnskey, inception, expiration)
+
+    assert rrsig.algorithm == 18
+    assert rrsig.key_tag == dns.dnssec.key_id(dnskey)
+    assert rrsig.type_covered == dns.rdatatype.MX
+    assert len(rrsig.signature) == 2420
+
+    # Independent oracle: rebuild the signing data from a fresh template whose
+    # only difference from the produced RRSIG is the empty signature.
+    template = dns.rdtypes.ANY.RRSIG.RRSIG(
+        rdclass=dns.rdataclass.IN, rdtype=dns.rdatatype.RRSIG,
+        type_covered=rrset.rdtype, algorithm=18,
+        labels=len(rrset.name) - 1, original_ttl=rrset.ttl,
+        expiration=expiration, inception=inception,
+        key_tag=dns.dnssec.key_id(dnskey), signer=signer, signature=b"")
+    data = dns.dnssec._make_rrsig_signature_data(rrset, template, None)
+    pub.verify(rrsig.signature, data, context=None)   # raises on failure
+
+
+def test_mldsa_offline_signing_end_to_end(tmp_path):
+    """
+    Generate an alg-18 CSK, sign the signer-mldsa.test fixture through the real
+    discover_keys -> sign_zone path, and verify every RRSIG with an independent
+    MLDSA44PublicKey.verify() of the reconstructed RFC 4034 3.1.8.1 data.
+    """
+    import base64
+    import dns.name
+    import dns.rrset
+    import dns.rdataclass
+    import dns.rdatatype
+    import dns.dnssec
+    import dns.rdtypes.ANY.RRSIG
+    from cryptography.hazmat.primitives.asymmetric import mldsa
+
+    sz = _signzone()
+    zone_name = "signer-mldsa.test"
+
+    # 1. Generate the alg-18 CSK triple into a tmp keydir via the keygen CLI.
+    keydir = tmp_path / "keys"
+    subprocess.run(
+        GENKEY + [zone_name, "-a", "18", "-f", "257", "--keydir", str(keydir)],
+        capture_output=True, text=True, check=True, env=SUBPROCESS_ENV)
+    dnskey_file = list(keydir.glob(f"{zone_name}+018+*.dnskey"))[0]
+
+    # 2. Load the fixture and inject the generated apex DNSKEY (the fixture has
+    #    no $INCLUDE because the key is random per run).
+    cwd = os.getcwd()
+    os.chdir(ZONE_DIR)
+    try:
+        zone = adns.zone.zone_from_file(
+            dns.name.from_text(zone_name), f"{zone_name}/zonefile")
+    finally:
+        os.chdir(cwd)
+    origin = zone.origin
+    # The .dnskey file is "<owner> <ttl> IN DNSKEY <flags> 3 18 <b64>"; take the
+    # rdata after the DNSKEY token.
+    dnskey_line = dnskey_file.read_text().split("DNSKEY", 1)[1].strip()
+    dnskey_rdata = dns.rdata.from_text(dns.rdataclass.IN,
+                                       dns.rdatatype.DNSKEY, dnskey_line)
+    zone.find_rdataset(origin, dns.rdatatype.DNSKEY, create=True).add(
+        dnskey_rdata, 7200)
+
+    # 3. Discover the key, strip, and sign (NSEC mode; no NSEC3PARAM in fixture).
+    keys = sz.discover_keys(zone, str(keydir))
+    sz.strip_dnssec(zone)
+    now = 1_700_000_000
+    inception, expiration = now - 3600, now + 2592000
+    sz.sign_zone(zone, keys, inception, expiration, 0)
+
+    # 4. Independent verify oracle over every RRSIG in the signed zone.
+    # (dnskey_rdata.key holds the raw public-key bytes; going via str() and
+    # splitting on whitespace would only grab the first base64 wrap-chunk.)
+    pub = mldsa.MLDSA44PublicKey.from_public_bytes(dnskey_rdata.key)
+    verified = 0
+    for name, node in zone.nodes.items():
+        for rrsig_ds in [r for r in node.rdatasets
+                         if r.rdtype == dns.rdatatype.RRSIG]:
+            covered = rrsig_ds.covers
+            covered_ds = node.get_rdataset(dns.rdataclass.IN, covered)
+            rrset = dns.rrset.RRset(name, dns.rdataclass.IN, covered)
+            rrset.update(covered_ds)
+            for rrsig in rrsig_ds:
+                assert rrsig.algorithm == 18
+                assert rrsig.key_tag == keys[0].keytag
+                labels = len(name) - 1
+                if name.is_wild():
+                    labels -= 1
+                template = dns.rdtypes.ANY.RRSIG.RRSIG(
+                    rdclass=dns.rdataclass.IN, rdtype=dns.rdatatype.RRSIG,
+                    type_covered=covered, algorithm=18, labels=labels,
+                    original_ttl=rrset.ttl, expiration=rrsig.expiration,
+                    inception=rrsig.inception, key_tag=rrsig.key_tag,
+                    signer=rrsig.signer, signature=b"")
+                data = dns.dnssec._make_rrsig_signature_data(
+                    rrset, template, None)
+                pub.verify(rrsig.signature, data, context=None)
+                verified += 1
+    # apex SOA + NS + DNSKEY + ns A + www A + www AAAA + NSEC chain (>= 4 NSECs)
+    assert verified >= 9

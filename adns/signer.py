@@ -34,6 +34,7 @@ import dns.rdatatype
 import dns.rrset
 import dns.dnssec
 import dns.exception
+import dns.rdtypes.ANY.RRSIG
 from dns.rdtypes.dnskeybase import SEP
 
 from adns.crypto import load_private_key, key_basename
@@ -47,6 +48,8 @@ class SignerError(Exception):
 
 _UNIT_SECONDS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400,
                  'w': 604800, 'y': 31536000}
+
+ALG_MLDSA44 = 18
 
 
 def parse_duration(spec):
@@ -167,9 +170,58 @@ def rrsig_rdata(rrset, private_key, signer,      # pylint: disable=too-many-posi
     """
     Uncached RRSIG generation with explicit absolute times -- the offline
     analog of the server's cached sign_rrset(). Returns RRSIG rdata.
+
+    Algorithm 18 (ML-DSA-44) is signed by _rrsig_rdata_mldsa() because
+    dns.dnssec.sign() rejects it; every other algorithm goes through
+    dns.dnssec.sign() unchanged.
     """
+    if dnskey.algorithm == ALG_MLDSA44:
+        return _rrsig_rdata_mldsa(rrset, private_key, signer, dnskey,
+                                  inception, expiration)
     return dns.dnssec.sign(rrset, private_key, signer, dnskey,
                            inception=inception, expiration=expiration)
+
+
+def _rrsig_rdata_mldsa(rrset, private_key, signer,   # pylint: disable=too-many-positional-arguments
+                       dnskey, inception, expiration):
+    """
+    Build an algorithm-18 (ML-DSA-44) RRSIG.
+
+    dns.dnssec.sign() raises UnsupportedAlgorithm for alg 18, so we assemble the
+    RRSIG the same way it does internally: build the RRSIG rdata with an empty
+    signature, obtain the RFC 4034 3.1.8.1 data-to-be-signed via dnspython's
+    (algorithm-agnostic) _make_rrsig_signature_data(), sign it with pure ML-DSA
+    (empty context -> context=None), and splice the 2420-octet signature in.
+    Signing is hedged (no deterministic option in cryptography); a hedged
+    ML-DSA signature is valid and is what draft-westerbaan-dnssec-mldsa prefers.
+
+    The offline callers pass absolute names and absolute POSIX-int times, so no
+    origin derelativization or timestamp normalization is needed (origin=None).
+
+    Remove this branch once dnspython signs algorithm 18 natively.
+    """
+    # _make_rrsig_signature_data is a private dnspython API that only the
+    # algorithm-18 path relies on; check it here, at signing time, so a future
+    # dnspython that removes it fails loudly for alg 18 alone rather than
+    # breaking import (and thus alg 8/13/15 signing) for the whole module.
+    if not hasattr(dns.dnssec, "_make_rrsig_signature_data"):
+        raise SignerError(
+            "algorithm-18 (ML-DSA-44) signing requires "
+            "dns.dnssec._make_rrsig_signature_data; this dnspython build "
+            "lacks it")
+    rrname = rrset.name
+    labels = len(rrname) - 1
+    if rrname.is_wild():
+        labels -= 1
+    template = dns.rdtypes.ANY.RRSIG.RRSIG(
+        rdclass=rrset.rdclass, rdtype=dns.rdatatype.RRSIG,
+        type_covered=rrset.rdtype, algorithm=dnskey.algorithm, labels=labels,
+        original_ttl=rrset.ttl, expiration=expiration, inception=inception,
+        key_tag=dns.dnssec.key_id(dnskey), signer=signer, signature=b"")
+    data = dns.dnssec._make_rrsig_signature_data(  # pylint: disable=protected-access
+        rrset, template, None)
+    signature = private_key.sign(data, context=None)
+    return template.replace(signature=signature)
 
 
 def classify_signers(keys):

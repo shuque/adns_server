@@ -96,7 +96,7 @@ pip3 install git+https://github.com/shuque/adns_server.git
 ```
 
 To install a specific released version, append the tag, e.g.
-`...adns_server.git@v0.14.0`.
+`...adns_server.git@v0.15.0`.
 
 For development, install in editable mode from a local checkout so that the
 console scripts (`adns-server`, `signzone`, `adnskeygen`) point back at your
