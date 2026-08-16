@@ -11,6 +11,7 @@ adns_server.egg-info/
 build/
 scratch/
 docs/superpowers/
+MLDSA.md
 tests/*
 !tests/pytest/
 tests/pytest/.server.log
