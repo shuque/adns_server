@@ -11,9 +11,10 @@ For a detailed technical design document, see **[Design.md](Design.md)**.
 
 The server implements the DNSSEC protocol extensions. It can serve
 pre-signed master file format zones, both NSEC and NSEC3 (e.g. zones
-generated with an offline signer like BIND's dnssec-signzone). It can
-also perform online signing with a combined signing key. For online
-signing it supports several methods of denial of existence:
+generated with an offline signer like BIND's dnssec-signzone or the
+signzone program included in this package). It can also perform online
+signing with a combined signing key. For online signing it supports
+several methods of denial of existence:
 
 * [Compact Denial of Existence](https://datatracker.ietf.org/doc/rfc9824/)
   (RFC 9824), using either NSEC or NSEC3. This is enabled per zone with
@@ -133,13 +134,6 @@ working tree and pick up edits without reinstalling:
 pip3 install -e .
 ```
 
-Installing into a virtualenv does not require activating it first: invoking
-the venv's interpreter directly (e.g. `/path/to/venv/bin/python3 -m pip
-install -e .`) installs into that environment regardless. Activation
-(`. /path/to/venv/bin/activate`) only puts the venv's `bin/` on your `PATH` —
-so activate the environment (or use the full path to each script) before
-running the installed `adns-server`/`signzone`/`adnskeygen` commands.
-
 Without any install, the entry points can also be run directly from the repo
 as modules: `python3 -m adns`, `python3 -m adns.signer`, `python3 -m
 adns.keygen`.
@@ -220,9 +214,10 @@ positional arguments:
 options:
   -h, --help            show this help message and exit
   -a N                  DNSSEC algorithm number: 8 (RSASHA256),
-                        13 (ECDSAP256SHA256), 15 (ED25519) (default: 13)
+                        13 (ECDSAP256SHA256), 15 (ED25519),
+                        18 (MLDSA44) (default: 13)
   -b N, --bits N        RSA key size in bits for algorithm 8; ignored for
-                        13/15 (default: 1280, minimum: 1280)
+                        13/15/18 (default: 1280, minimum: 1280)
   -f N                  Value of DNSKEY flags field (default: 257)
   -K DIR, --keydir DIR  write keytag-named .pem/.dnskey/.ds triple here
   --prepublish          write the private key as .prepublish.pem so the
@@ -255,12 +250,15 @@ example.com. 7200 IN DNSKEY 257 3 13 oBQvOkuVPdp7Wes6EcWra7UlyI3u9EeM nRd79CSmq4
 
 `adnskeygen` generates keys for algorithms 8 (RSASHA256), 13 (ECDSAP256SHA256),
 and 15 (ED25519) — the set marked RECOMMENDED for signing in the IANA DNSSEC
-Algorithm Numbers registry. For algorithm 8, `-b/--bits` sets the RSA modulus
-(default and minimum 1280 bits; a small default keeps NSEC3 negative responses
-under the common path-MTU). The server itself imposes no algorithm allowlist
-for serving or online signing: it serves zones pre-signed with any algorithm
-supported by dnspython/`cryptography` (e.g. RSA zones signed by BIND's
-`dnssec-signzone`) and can online-sign with algorithm 8 as well.
+Algorithm Numbers registry — plus 18 (ML-DSA-44), the post-quantum algorithm of
+FIPS 204, tracking draft-westerbaan-dnssec-mldsa (see Design.md §11). For
+algorithm 8, `-b/--bits` sets the RSA modulus (default and minimum 1280 bits; a
+small default keeps NSEC3 negative responses under the common path-MTU).
+Algorithm 18 requires a `cryptography` build with ML-DSA support (50.0.0 or
+later). The server itself imposes no algorithm allowlist for serving or online
+signing: it serves zones pre-signed with any algorithm supported by
+dnspython/`cryptography` (e.g. RSA zones signed by BIND's `dnssec-signzone`) and
+can online-sign with algorithm 8 and 18 as well.
 
 ## Generating DELEG / DELEGPARAM Records
 
