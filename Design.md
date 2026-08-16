@@ -815,3 +815,107 @@ rather than a patch. `adns-server` (via `adns.__main__:main`) shipped in Task
 in Task 9, completing the console-script surface with no further version bump
 (per the Task 9 brief: the CLI-surface minor bump to `0.12.0` already covers
 this).
+
+---
+
+## 11. ML-DSA-44 (DNSSEC algorithm 18)
+
+The server supports **ML-DSA-44** (DNSSEC algorithm 18), the post-quantum
+signature scheme of FIPS 204, tracking **draft-westerbaan-dnssec-mldsa**
+(committed in `specs/`). Only ML-DSA-44 is defined for DNSSEC; the larger
+parameter sets (65, 87) are not. Support spans all three DNSSEC surfaces —
+key generation (§9), offline signing (§8), and online signing (§5.1) — and the
+server serves and (given a private key) online-signs alg-18 zones just as it
+does alg 8/13/15.
+
+An alg-18 DNSKEY carries the 1312-octet FIPS 204 raw public key; an RRSIG
+carries a 2420-octet signature. Both are far larger than the classical
+algorithms', so alg-18 responses routinely exceed the common path-MTU and the
+server's EDNS budget; the ordinary `max_size()`/`truncate()` machinery (§7)
+handles this by setting TC and forcing TCP fallback — there is no alg-18-specific
+size handling.
+
+### 11.1 The dnspython gap
+
+ML-DSA is pre-standardization, and **dnspython 2.7.0 does not implement
+algorithm 18**: `dns.dnssec.make_dnskey()`, `sign()`, and `validate()` all raise
+`UnsupportedAlgorithm` for it. The cryptographic primitive itself lives in the
+`cryptography` package (`cryptography.hazmat.primitives.asymmetric.mldsa`,
+requiring a build whose bundled OpenSSL has ML-DSA — 50.0.0 is known good).
+The implementation therefore bridges the gap by calling `cryptography` directly
+for the parts dnspython refuses, while reusing every dnspython helper that *is*
+algorithm-agnostic. Three helpers turn out to work unchanged for alg 18 —
+`dns.dnssec.key_id()` (keytag) and `dns.dnssec.make_ds()` (DS digest), which
+operate on the DNSKEY RDATA opaquely, and PKCS8 PEM key loading via
+`crypto.load_private_key()`.
+
+Because `mldsa` needs a much newer `cryptography` than the project's floor
+(`cryptography>=43.0.0`), it is imported **lazily**, inside the alg-18 branch,
+never at module top level — a top-level import would `ImportError` on the floor
+and break alg 8/13/15 for everyone. The `mldsa` import in `keygen.py` carries a
+`pylint: disable=import-outside-toplevel` for this reason.
+
+### 11.2 Key generation
+
+`adnskeygen -a 18` (§9) generates a random key with
+`mldsa.MLDSA44PrivateKey.generate()` and writes it as a **PKCS8 PEM** — the same
+on-disk format as the other algorithms, so the keytag-named `.pem` triple stays
+uniform and `crypto.load_private_key()` reads it with no special case. Since
+`make_dnskey()` rejects alg 18, `dnskey_rdata_for()` builds the DNSKEY from
+presentation text (`f"{flags} 3 18 {base64(pub.public_bytes_raw())}"`) and then
+reuses the unchanged `key_id()`/`make_ds()` on the resulting RDATA.
+
+### 11.3 Signing (offline and online)
+
+Both the offline signer and the online signing path route alg-18 signing through
+a single shared builder, `crypto.mldsa_rrsig_rdata(rrset, private_key, signer,
+dnskey, inception, expiration)`. It reconstructs what `dns.dnssec.sign()` does
+internally, but with the signature computed by `cryptography`:
+
+1. Build an RRSIG rdata template with an **empty** signature (labels =
+   `len(name) - 1`, minus one more for a wildcard; `key_tag = key_id(dnskey)`).
+2. Obtain the RFC 4034 §3.1.8.1 data-to-be-signed via dnspython's
+   algorithm-agnostic **private** helper
+   `dns.dnssec._make_rrsig_signature_data(rrset, template, None)`.
+3. Sign with `private_key.sign(data, context=None)` — pure ML-DSA with the
+   spec's empty context — yielding the 2420-octet signature.
+4. Splice it in with `template.replace(signature=...)`.
+
+`crypto.sign_rrset()` branches on `zone.signing_dnskey.algorithm == 18` to call
+this builder instead of `dns.dnssec.sign()`; the offline signer's
+`rrsig_rdata()` branches identically. Everything downstream — the signature
+cache, the response machinery, the denial-of-existence constructions — is
+algorithm-independent and unchanged. A CSK is the natural fit for online alg-18
+signing (§5.1).
+
+**Signing is hedged (randomized).** `cryptography` exposes no deterministic
+ML-DSA option, so the same RRset signed twice yields two different, both-valid
+signatures — which is exactly what draft-westerbaan-dnssec-mldsa prefers for
+online signing. The process-wide signature cache (§5.1) is what makes repeated
+online answers byte-stable despite this.
+
+**The `_make_rrsig_signature_data` dependency is guarded at signing time.** It
+is a private dnspython API; a future dnspython could remove it. The builder
+checks `hasattr(dns.dnssec, "_make_rrsig_signature_data")` on each call and
+raises `crypto.DnssecUnsupported` (a `RuntimeError`, not `SignerError` — the
+check lives in `crypto.py`, which `signer.py` imports, so it cannot depend on
+`signer.py` without a circular import). Checking at signing time rather than
+import time preserves the property that a missing private helper breaks only
+alg-18 signing, never alg 8/13/15. The offline signer's CLI catches
+`(SignerError, DnssecUnsupported)` so the abort is a clean error message; on the
+online path a fired guard degrades to SERVFAIL via the response handler's
+exception path.
+
+### 11.4 Validation and testing
+
+dnspython cannot **validate** alg 18 either, so the test suite never calls
+`dns.dnssec.validate()` for it. Instead the alg-18 tests
+(`tests/pytest/test_mldsa_serving.py`, `test_mldsa_online.py`, and the signer
+tests) use a self-contained oracle: they rebuild the §3.1.8.1 signing input from
+a fresh empty-signature RRSIG template and verify with
+`MLDSA44PublicKey.from_public_bytes(pub).verify(sig, data, context=None)`. This
+matches the suite's minimize-external-tool-dependencies philosophy and, because
+hedged signatures are not reproducible, is verify-based rather than
+fixed-vector. Keys are generated at test time (no key material is committed);
+the modules are guarded with `pytest.importorskip` on the `mldsa` primitive so
+they skip cleanly where `cryptography` lacks it.

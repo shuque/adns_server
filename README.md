@@ -34,6 +34,33 @@ The 'dnssec: true' parameter must be specified in the configuration file
 for signed zones. The 'dynamic_signing: true' and 'private_key: /path/to/privatekey.pem'
 options are needed for online signing.
 
+## Offline Signing
+
+The package includes an offline zone signer, `signzone` (`adns/signer.py`, also
+runnable as `python3 -m adns.signer`), for operators who prefer to serve
+pre-signed zones rather than sign online. It reads an unsigned master file and a
+directory of private keys, and writes a conventional signed zone
+(`<zonefile>.signed`) that this server — or any RFC 4035 / 5155 authoritative
+server — can serve.
+
+```
+$ signzone example.com zonefile.example
+```
+
+It signs both NSEC and NSEC3 zones (add an `NSEC3PARAM` record at the apex to
+select NSEC3), supports CSK and split KSK/ZSK key setups, and enables key
+rollover by treating a published DNSKEY with no matching private key as
+publish-only. Keys are the keytag-named triples produced by `adnskeygen`
+(`<zone>+<alg>+<keytag>.pem`, see below); `-K/--keydir` points at that
+directory. RRSIG validity is controlled with `-i/--inception`, `-e/--expiration`
+(BIND-compatible time syntax, e.g. `+30d`), and `-j/--jitter`.
+
+The signer shares its entire zone and DNSSEC model with the server, so its
+output matches the server's serving semantics by construction. This is what lets
+it sign DELEG zones correctly (see below), which most third-party signers cannot
+do. See the offline-signer section of **[Design.md](Design.md)** (§8) for the
+full CLI, key-discovery rules, and signing pipeline.
+
 ## DELEG Support
 
 The server implements the authoritative-server behavior for DELEG, a newly
@@ -60,11 +87,11 @@ mis-generate the delegation-point NSEC/NSEC3 bitmaps). With online signing, this
 program recognizes the DELEG record, places it in the referral for the
 corresponding delegation, and generates the signature dynamically.
 
-For offline signing, the package includes a DELEG-aware zone signer,
-`signzone` (`adns/signer.py`), which signs the DELEG RRset at the cut and sets the DELEG bit in
-the delegation-point NSEC/NSEC3 bitmap, so the program can serve pre-signed
-zones with DELEG. See the offline-signer section of **[Design.md](Design.md)**
-(§8).
+For offline signing, the bundled `signzone` tool (see **Offline Signing**
+above) is DELEG-aware: it signs the DELEG RRset at the cut and sets the DELEG
+bit in the delegation-point NSEC/NSEC3 bitmap, so the program can serve
+pre-signed zones with DELEG. See the offline-signer section of
+**[Design.md](Design.md)** (§8).
 
 For the full details of the implementation — type codes and EDNS signaling, the
 DE=1 and DE=0 referral/occlusion behavior, the DNSSEC proofs used, the relevant
