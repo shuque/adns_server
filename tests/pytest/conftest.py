@@ -135,6 +135,79 @@ def minimal_any_server():
         yield endpoint
 
 
+@pytest.fixture(scope="session")
+def mldsa_servers(tmp_path_factory):
+    """
+    Serve an offline pre-signed algorithm-18 (ML-DSA-44) zone under two EDNS
+    ceilings.
+
+    Generates an alg-18 CSK, offline-signs the committed mldsa.test fixture,
+    and launches two static (dnssec: true, no dynamic_signing) server instances
+    that differ only in their EDNS send-ceiling: "large" (edns: 4096, returns
+    the big DNSKEY+RRSIG over UDP) and "capped" (edns: 1432, truncates). Online
+    alg-18 signing does not exist yet (phase 3), so the zone must be pre-signed.
+
+    Yields {"large": (host, port), "capped": (host, port), "pub": <raw 1312
+    octets of the ML-DSA public key>}.
+    """
+    import shutil
+    import dns.rdata
+
+    tmp = tmp_path_factory.mktemp("mldsa")
+    keydir = tmp / "keys"
+    keydir.mkdir()
+
+    # 1. Generate the alg-18 CSK.
+    subprocess.run(
+        [sys.executable, "-m", "adns.keygen", "mldsa.test", "-a", "18",
+         "-f", "257", "-K", str(keydir)],
+        capture_output=True, text=True, check=True, env=SUBPROCESS_ENV)
+    dnskey_file = list(keydir.glob("mldsa.test+018+*.dnskey"))[0]
+
+    # 2. Copy the committed unsigned zone in and inject the apex DNSKEY line.
+    zonefile = tmp / "zonefile"
+    shutil.copy(os.path.join(ZONE_DIR, "mldsa.test", "zonefile"), zonefile)
+    with open(zonefile, "a", encoding="utf-8") as fobj:
+        fobj.write(dnskey_file.read_text())
+
+    # 3. Offline-sign with a fixed far-future expiration.
+    signed = tmp / "zonefile.signed"
+    subprocess.run(
+        [sys.executable, "-m", "adns.signer", "mldsa.test", str(zonefile),
+         "-K", str(keydir), "-o", str(signed), "-e", "+3650d"],
+        capture_output=True, text=True, check=True, env=SUBPROCESS_ENV)
+
+    # 4. Extract the raw public key from the generated DNSKEY (last field is the
+    #    base64 key; dnspython's rdata.key gives the decoded bytes).
+    dnskey_line = dnskey_file.read_text().split("DNSKEY", 1)[1].strip()
+    dnskey_rdata = dns.rdata.from_text(dns.rdataclass.IN,
+                                       dns.rdatatype.DNSKEY, dnskey_line)
+    pub = dnskey_rdata.key
+
+    # 5. Write two static configs, absolute file path, differing only in edns.
+    def _write_config(name, edns):
+        path = tmp / name
+        path.write_text(
+            "config:\n"
+            f"  edns: {edns}\n"
+            "zones:\n"
+            '  - name: "mldsa.test"\n'
+            f'    file: "{signed}"\n'
+            "    dnssec: true\n")
+        return str(path)
+
+    large_cfg = _write_config("large.yaml", 4096)
+    capped_cfg = _write_config("capped.yaml", 1432)
+
+    # 6. Launch both servers for the session.
+    with contextlib.ExitStack() as stack:
+        large = stack.enter_context(
+            _launch_server(large_cfg, ".server-mldsa-large.log"))
+        capped = stack.enter_context(
+            _launch_server(capped_cfg, ".server-mldsa-capped.log"))
+        yield {"large": large, "capped": capped, "pub": pub}
+
+
 def _make_query_fn(endpoint):
     """Build a query function bound to a given (host, port) endpoint."""
     host, port = endpoint
