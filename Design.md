@@ -54,8 +54,7 @@ compliant behavior for serving such delegations.
 
 **Not yet supported:** Features not supported today, but which might be
 implemented in the future, include Zone Transfer (AXFR/IXFR), Dynamic Update,
-persistent TCP connections, Secure Transport (DoT or DoQ), Post Quantum
-signature algorithms, etc.
+persistent TCP connections, Secure Transport (DoT or DoQ), etc.
 
 **Runtime shape:** one multi-threaded process with a `select()`-driven accept
 loop that dispatches each query to a short-lived worker thread, capped by a bounded
@@ -365,8 +364,9 @@ delegation would.
 
 The **key-generation tool (`adnskeygen`, §9) is restricted to algorithms 8
 (RSASHA256), 13 (ECDSAP256SHA256), and 15 (ED25519)** — the set marked
-RECOMMENDED for signing in the IANA DNSSEC Algorithm Numbers registry. ECDSA/
-EdDSA remain the natural choice for online signing (cheap public-key
+RECOMMENDED for signing in the IANA DNSSEC Algorithm Numbers registry, plus
+the pre-standard post-quantum algorithm 18 (MLDSA; for details, see §11).
+ECDSA/EdDSA remain the natural choice for online signing (cheap public-key
 operations); RSASHA256 is supported primarily for precomputed offline
 signatures and interoperability with the large installed base of RSA-signed
 zones. For algorithm 8 the RSA modulus is set by `adnskeygen -b/--bits`
