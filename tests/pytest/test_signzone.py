@@ -595,6 +595,34 @@ def test_nsec3_excludes_occluded_names():
             f"{occluded} must not have an NSEC3"
 
 
+def test_nsec3_covering_wraps_below_minimum():
+    # The NSEC3 chain is circular: a name whose hash sorts below the smallest
+    # NSEC3 owner is covered by the last (largest-hash) NSEC3, whose next field
+    # wraps back to the smallest. Regression for the mldsan3.huque.com wildcard
+    # failure -- nsec3_covering() used to scan downward and give up at index 0,
+    # returning no covering record, so a wildcard/NXDOMAIN next-closer proof
+    # lost its NSEC3 and the response failed to validate. (General bug, not
+    # ML-DSA-specific; it only surfaced there because the next-closer name
+    # happened to hash below the chain minimum.)
+    zone, _keys = _sign_nsec3_fixture()
+    zone.init_dnssec()          # populate nsec3param (sign path doesn't)
+    n3 = _nsec3_records(zone)
+    owners = sorted(n3, key=lambda n: n.labels[0])   # base32hex sorts as hash
+    minlabel, maxname = owners[0].labels[0], owners[-1]
+    # Find a name whose hashed owner sorts strictly below the chain minimum.
+    below = None
+    for i in range(5000):
+        cand = dns.name.from_text(f"wrap{i}.wild." + NSEC3_ZONE_NAME + ".")
+        if zone.nsec3_hashed_owner(cand).labels[0] < minlabel:
+            below = cand
+            break
+    assert below is not None, "no below-minimum hash found in 5000 tries"
+    covering = zone.nsec3_covering(below)
+    assert covering is not None, "below-minimum name got no covering NSEC3"
+    assert covering.name == maxname, \
+        "covering NSEC3 must be the last (wrap-around) owner"
+
+
 def test_nsec3_cut_bitmap_excludes_occluded_data():
     # A data RRset (TXT) sitting at a delegation cut is occluded parent-side
     # data: it must not be signed, and must not appear in the cut's NSEC3 type

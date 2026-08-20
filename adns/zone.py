@@ -123,13 +123,21 @@ class Zone(dns.zone.Zone):
     def nsec_covering(self, name):
         """Return NSEC RRset covering the name"""
 
-        position = self.nodes.bisect_left(name) - 1
-        while True:
+        # Ordered by canonical owner name, so the floor for any in-zone query is
+        # the apex (which always bears an NSEC) -- unlike the hash-ordered NSEC3
+        # chain, a legitimate query can't sort below the minimum. We still scan
+        # with a modulo wrap bounded by the node count so the below-minimum and
+        # termination guarantees hold by construction, not by relying on that
+        # apex invariant (mirrors nsec3_covering).
+        count = len(self.nodes)
+        position = (self.nodes.bisect_left(name) - 1) % count
+        for _ in range(count):
             nsec_name = self.nodes.peekitem(position)[0]
             nsec_rrset = self.get_rrset(nsec_name, dns.rdatatype.NSEC)
             if nsec_rrset:
                 return nsec_rrset
-            position -= 1
+            position = (position - 1) % count
+        return None
 
     def covering_predecessor(self, name, ideal=False):
         """
@@ -207,16 +215,22 @@ class Zone(dns.zone.Zone):
             return None
 
         owner = self.nsec3_hashed_owner(name)
-        search_index = self.nodes.bisect(owner) - 1
-        while True:
-            name, node = self.nodes.peekitem(search_index)
+        # The NSEC3 chain is circular: a hash that sorts below the smallest
+        # NSEC3 owner is covered by the last (largest-hash) NSEC3, whose next
+        # field wraps around to the smallest. Scan downward from the floor,
+        # wrapping past index 0 back to the top of the map (bounded by the node
+        # count) rather than giving up -- otherwise below-minimum names get no
+        # covering NSEC3 (e.g. a wildcard/NXDOMAIN next-closer proof loses its
+        # record and the response fails to validate).
+        count = len(self.nodes)
+        search_index = (self.nodes.bisect(owner) - 1) % count
+        for _ in range(count):
+            nsec3_name, node = self.nodes.peekitem(search_index)
             rdataset = node.get_rdataset(dns.rdataclass.IN,
                                          dns.rdatatype.NSEC3)
             if rdataset:
-                return rrset_from_rdataset(name, rdataset)
-            search_index -= 1
-            if search_index < 0:
-                break
+                return rrset_from_rdataset(nsec3_name, rdataset)
+            search_index = (search_index - 1) % count
         return None
 
     def reject_wildcard_deleg(self):
