@@ -22,12 +22,22 @@ NXNAME = "TYPE128"
 # --------------------------------------------------------------------------
 
 def test_de1_deleg_with_ds(query, dnskey):
-    """sub1: NS+DS+DELEG -> DELEG RRset + DS, NO NS; all signatures valid."""
+    """sub1: NS+DS+DELEG -> DELEG RRset + DS + matching NSEC (DELEG in bitmap),
+    NO NS; all signatures valid. The NSEC is delext-10 6.2's proof that the
+    Delegation Types were not stripped and MUST accompany the referral even
+    though DS is present."""
     r = query("foo.sub1.deleg.test", "A", do=True, de=True)
     types = du.section_types(r.authority)
     assert DELEG in types
     assert "DS" in types
     assert "NS" not in types
+    assert "NSEC" in types
+    nsec = du.rrsets_of_type(r.authority, "NSEC")[0]
+    assert du.nsec_matches(nsec, "sub1.deleg.test")
+    bitmap = du.nsec_bitmap(nsec)
+    assert DELEG in bitmap           # proves Delegation Types present
+    assert "DS" in bitmap
+    assert NXNAME not in bitmap      # matching NSEC at a real cut, not a black lie
     du.validate_all(r, dnskey("deleg.test"), "deleg.test")
 
 
@@ -155,12 +165,15 @@ def test_de0_qtype_deleg_returned_as_data(query, dnskey):
 
 def test_de1_any_at_deleg_cut_is_referral(query, dnskey):
     """sub1 (NS+DS+DELEG), DE=1, QTYPE=ANY: DELEG-aware referral, not a data
-    dump -- DELEG+DS in authority, no NS, AA=0 (as-if-DS: a referral)."""
+    dump -- DELEG+DS+matching NSEC in authority, no NS, AA=0 (as-if-DS: a
+    referral)."""
     r = query("sub1.deleg.test", "ANY", do=True, de=True)
     types = du.section_types(r.authority)
     assert DELEG in types
     assert "DS" in types
     assert "NS" not in types
+    assert "NSEC" in types
+    assert DELEG in du.nsec_bitmap(du.rrsets_of_type(r.authority, "NSEC")[0])
     assert not r.answer
     assert not du.has_flag(r, "AA")
     du.validate_all(r, dnskey("deleg.test"), "deleg.test")
@@ -228,6 +241,21 @@ def test_nsec3_de1_deleg_only(query, dnskey):
     assert DELEG in du.section_types(r.authority)
     nsec3s = du.rrsets_of_type(r.authority, "NSEC3")
     assert any(DELEG in du.nsec_bitmap(n) for n in nsec3s)
+    du.validate_all(r, dnskey("nsec3.test"), "nsec3.test")
+
+
+def test_nsec3_de1_deleg_with_ds(query, dnskey):
+    """nsec3.test sub2 (NS+DS+DELEG): DE=1 -> DELEG + DS + matching NSEC3 whose
+    bitmap carries DELEG. delext-10 6.2 proof accompanies the referral even with
+    DS present (NSEC3 counterpart of test_de1_deleg_with_ds)."""
+    r = query("foo.sub2.nsec3.test", "A", do=True, de=True)
+    types = du.section_types(r.authority)
+    assert DELEG in types
+    assert "DS" in types
+    assert "NS" not in types
+    nsec3s = du.rrsets_of_type(r.authority, "NSEC3")
+    assert any(du.nsec3_matches(n, "sub2.nsec3.test", "nsec3.test")
+               and DELEG in du.nsec_bitmap(n) for n in nsec3s)
     du.validate_all(r, dnskey("nsec3.test"), "nsec3.test")
 
 

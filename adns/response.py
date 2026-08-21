@@ -515,8 +515,12 @@ class ReferralMixin:
 
         deleg-10 5.2.1: if the delegation has a DELEG RRset, it goes into
         the Authority section and the NS RRset MUST NOT be included; DS is
-        included when present, otherwise NSEC/NSEC3 proves DS absence. If
-        there is no DELEG RRset, this is a legacy NS referral, but the
+        included when present. delext-10 6.2 additionally requires the
+        matching NSEC/NSEC3 -- its type bitmap listing the Delegation Types
+        -- so a validator can confirm the DELEG RRset was not stripped; this
+        proof accompanies every secure referral with a DELEG RRset,
+        independent of DS (and, when DS is absent, also proves DS absence).
+        If there is no DELEG RRset, this is a legacy NS referral, but the
         absence of the DELEG RRset MUST additionally be proven (5.2.1.3).
         """
 
@@ -527,9 +531,14 @@ class ReferralMixin:
                 ds_rrset = zobj.get_rrset(sname, dns.rdatatype.DS)
                 if ds_rrset:
                     self.add_rrset(zobj, self.response.authority, ds_rrset)
-                else:
-                    # Insecure delegation: prove DS absence.
-                    self.add_nsec_matching(zobj, sname)
+                # delext-10 6.2: the matching NSEC/NSEC3 MUST accompany the
+                # referral to prove the Delegation Types are present (and,
+                # with DS absent, that DS is not). Add unconditionally -- the
+                # requirement is keyed to the delegating zone's ADT flag,
+                # which is the validator's concern; an authoritative server
+                # is under no obligation to inspect its own ADT flag, and the
+                # proof is harmless when ADT is clear.
+                self.add_nsec_matching(zobj, sname)
             return
 
         # No DELEG RRset: legacy NS referral, plus proof of DELEG absence.
