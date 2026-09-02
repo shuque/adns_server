@@ -355,8 +355,9 @@ delegation would.
 
 The **key-generation tool (`adnskeygen`, §9) is restricted to algorithms 8
 (RSASHA256), 13 (ECDSAP256SHA256), and 15 (ED25519)** — the set marked
-RECOMMENDED for signing in the IANA DNSSEC Algorithm Numbers registry, plus
-the pre-standard post-quantum algorithm 18 (MLDSA; for details, see §11).
+RECOMMENDED for signing in the IANA DNSSEC Algorithm Numbers registry — plus
+16 (ED448), for which signing is MAY in that registry, and the pre-standard
+post-quantum algorithm 18 (MLDSA; for details, see §11).
 ECDSA/EdDSA remain the natural choice for online signing (cheap public-key
 operations); RSASHA256 is supported primarily for precomputed offline
 signatures and interoperability with the large installed base of RSA-signed
@@ -534,8 +535,9 @@ in draft-huque-dnsop-multi-alg-rules.
 ## 9. Key generation (`adns/keygen.py`)
 
 `adns/keygen.py` (console script `adnskeygen`, `adns.keygen:main`; also
-runnable as `python3 -m adns.keygen`) generates an ECDSA P-256 (alg 13) or
-Ed25519 (alg 15) key and prints the private PEM, the DNSKEY RDATA/keytag, and
+runnable as `python3 -m adns.keygen`) generates an RSASHA256 (alg 8),
+ECDSA P-256 (alg 13), Ed25519 (alg 15), Ed448 (alg 16), or ML-DSA-44 (alg 18)
+key and prints the private PEM, the DNSKEY RDATA/keytag, and
 the DNSKEY RRset. With `-K DIR` it writes the keytag-named triple the signer
 consumes: `<zone>+<alg>+<keytag>.{pem,dnskey}`, plus `.ds` **only for SEP keys**
 (KSK/CSK) — a plain ZSK gets no DS, matching common operator practice.

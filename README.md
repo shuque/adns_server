@@ -124,7 +124,7 @@ pip3 install git+https://github.com/shuque/adns_server.git
 ```
 
 To install a specific released version, append the tag, e.g.
-`...adns_server.git@v0.16.2`.
+`...adns_server.git@v0.17.0`.
 
 For development, install in editable mode from a local checkout so that the
 console scripts (`adns-server`, `signzone`, `adnskeygen`) point back at your
@@ -215,9 +215,9 @@ options:
   -h, --help            show this help message and exit
   -a N                  DNSSEC algorithm number: 8 (RSASHA256),
                         13 (ECDSAP256SHA256), 15 (ED25519),
-                        18 (MLDSA44) (default: 13)
+                        16 (ED448), 18 (MLDSA44) (default: 13)
   -b N, --bits N        RSA key size in bits for algorithm 8; ignored for
-                        13/15/18 (default: 1280, minimum: 1280)
+                        13/15/16/18 (default: 1280, minimum: 1280)
   -f N                  Value of DNSKEY flags field (default: 257)
   -K DIR, --keydir DIR  write keytag-named .pem/.dnskey/.ds triple here
   --prepublish          write the private key as .prepublish.pem so the
@@ -250,15 +250,15 @@ example.com. 7200 IN DNSKEY 257 3 13 oBQvOkuVPdp7Wes6EcWra7UlyI3u9EeM nRd79CSmq4
 
 `adnskeygen` generates keys for algorithms 8 (RSASHA256), 13 (ECDSAP256SHA256),
 and 15 (ED25519) — the set marked RECOMMENDED for signing in the IANA DNSSEC
-Algorithm Numbers registry — plus 18 (ML-DSA-44), the post-quantum algorithm of
-FIPS 204, tracking draft-westerbaan-dnssec-mldsa (see Design.md §11). For
-algorithm 8, `-b/--bits` sets the RSA modulus (default and minimum 1280 bits; a
-small default keeps NSEC3 negative responses under the common path-MTU).
-Algorithm 18 requires a `cryptography` build with ML-DSA support (50.0.0 or
-later). The server itself imposes no algorithm allowlist for serving or online
-signing: it serves zones pre-signed with any algorithm supported by
+Algorithm Numbers registry — plus 16 (ED448), for which signing is MAY in that
+registry, and 18 (ML-DSA-44), the post-quantum algorithm of FIPS 204, tracking
+draft-westerbaan-dnssec-mldsa (see Design.md §11). For algorithm 8, `-b/--bits` sets the RSA modulus (default and minimum
+1280 bits; a small default keeps NSEC3 negative responses under the common
+path-MTU). Algorithm 18 requires a `cryptography` build with ML-DSA support
+(50.0.0 or later). The server itself imposes no algorithm allowlist for serving
+or online signing: it serves zones pre-signed with any algorithm supported by
 dnspython/`cryptography` (e.g. RSA zones signed by BIND's `dnssec-signzone`) and
-can online-sign with algorithm 8 and 18 as well.
+can online-sign with any algorithm `adnskeygen` produces (8, 13, 15, 16, 18).
 
 ## Generating DELEG / DELEGPARAM Records
 

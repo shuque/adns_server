@@ -19,6 +19,7 @@ import dns.rdatatype
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.asymmetric import ed448
 from cryptography.hazmat.primitives.asymmetric import rsa
 from dns.rdtypes.dnskeybase import SEP
 
@@ -41,14 +42,14 @@ def process_arguments():
     parser.add_argument("zone", help="DNS zone name")
     parser.add_argument("-a", type=int, dest='algorithm', metavar='N',
                         default=13,
-                        choices=[8, 13, 15, 18],
+                        choices=[8, 13, 15, 16, 18],
                         help="DNSSEC algorithm number: 8 (RSASHA256), "
                              "13 (ECDSAP256SHA256), 15 (ED25519), "
-                             "18 (MLDSA44) (default: %(default)d)")
+                             "16 (ED448), 18 (MLDSA44) (default: %(default)d)")
     parser.add_argument("-b", "--bits", type=int, metavar='N',
                         default=RSA_BITS_DEFAULT,
                         help="RSA key size in bits for algorithm 8; ignored "
-                             f"for 13/15/18 (default: %(default)d, "
+                             f"for 13/15/16/18 (default: %(default)d, "
                              f"minimum: {RSA_BITS_FLOOR})")
     parser.add_argument("-f", type=int, dest='flags', metavar='N',
                         default=257,
@@ -68,7 +69,8 @@ def generate_key(algorithm, bits=RSA_BITS_DEFAULT):
     Generate DNSSEC key for given algorithm.
 
     For algorithm 8 (RSASHA256), bits sets the RSA modulus size (minimum
-    RSA_BITS_FLOOR); bits is ignored for 13/15/18, which have fixed key sizes.
+    RSA_BITS_FLOOR); bits is ignored for 13/15/16/18, which have fixed key
+    sizes.
     """
     if algorithm == 8:
         if bits < RSA_BITS_FLOOR:
@@ -80,6 +82,8 @@ def generate_key(algorithm, bits=RSA_BITS_DEFAULT):
         private_key = ec.generate_private_key(ECDSA_CURVE)
     elif algorithm == 15:
         private_key = ed25519.Ed25519PrivateKey.generate()
+    elif algorithm == 16:
+        private_key = ed448.Ed448PrivateKey.generate()
     elif algorithm == ALG_MLDSA44:
         # Imported lazily: the mldsa module requires a recent cryptography
         # (bundled OpenSSL with ML-DSA), newer than the package floor, so a

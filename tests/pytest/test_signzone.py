@@ -872,6 +872,32 @@ def test_generate_key_bits_ignored_for_ec():
     assert priv is not None
 
 
+def test_generate_key_alg16():
+    """generate_key(16) yields an Ed448 key whose DNSKEY builds and keytags."""
+    from cryptography.hazmat.primitives.asymmetric import ed448
+
+    priv, pub = adns.keygen.generate_key(16)
+    assert isinstance(priv, ed448.Ed448PrivateKey)
+    rdata = adns.keygen.dnskey_rdata_for(pub, 16, 257)
+    assert rdata.algorithm == 16
+    assert len(rdata.key) == 57                       # RFC 8080 Ed448 pubkey
+    assert isinstance(dns.dnssec.key_id(rdata), int)
+    ds = dns.dnssec.make_ds(dns.name.from_text("ed448.test."), rdata,
+                            algorithm=2)
+    assert ds.algorithm == 16 and ds.digest_type == 2
+
+
+def test_generate_key_alg16_pem_roundtrips(tmp_path):
+    """An alg-16 PEM written by keygen loads back through load_private_key."""
+    from cryptography.hazmat.primitives.asymmetric import ed448
+
+    priv, _pub = adns.keygen.generate_key(16)
+    pem_path = tmp_path / "ed448.pem"
+    pem_path.write_text(adns.keygen.pem_data_for_private_key(priv))
+    loaded = adns.crypto.load_private_key(str(pem_path))
+    assert isinstance(loaded, ed448.Ed448PrivateKey)
+
+
 MLDSA_SEED = bytes(range(32))
 MLDSA_KEYTAG = 59829
 MLDSA_DS = "812cb1a22af04380e2f72d91c06c14eb1a918cf30037a8a9c67497e9264b4bfa"
@@ -952,8 +978,32 @@ def test_adnskeygen_cli_alg8_writes_triple(tmp_path):
     assert key.key_size == 1280
 
 
+def test_adnskeygen_cli_alg16_writes_triple(tmp_path):
+    """adnskeygen -a 16 writes a +016+ key triple whose PEM loads as Ed448."""
+    from cryptography.hazmat.primitives.asymmetric import ed448
+
+    keydir = tmp_path / "keys"
+    result = subprocess.run(
+        GENKEY + ["ed448.test", "-a", "16", "-f", "257",
+                  "--keydir", str(keydir)],
+        capture_output=True, text=True, check=True, env=SUBPROCESS_ENV)
+    pems = list(keydir.glob("ed448.test+016+*.pem"))
+    assert len(pems) == 1, result.stdout
+    base = pems[0].name[:-4]
+    assert (keydir / (base + ".dnskey")).exists()
+    ds_path = keydir / (base + ".ds")
+    assert ds_path.exists()
+    assert ds_path.read_text().startswith("ed448.test. IN DS ")
+    assert (pems[0].stat().st_mode & 0o777) == 0o600
+    key = adns.crypto.load_private_key(str(pems[0]))
+    assert isinstance(key, ed448.Ed448PrivateKey)
+    tag_in_name = int(base.rsplit("+", 1)[1])
+    rdata = adns.keygen.dnskey_rdata_for(key.public_key(), 16, 257)
+    assert dns.dnssec.key_id(rdata) == tag_in_name
+
+
 def test_adnskeygen_cli_rejects_alg_rsasha1():
-    """argparse choices reject an algorithm outside {8,13,15} (e.g. 5)."""
+    """argparse choices reject an algorithm outside {8,13,15,16,18} (e.g. 5)."""
     result = subprocess.run(
         GENKEY + ["x.test", "-a", "5"],
         capture_output=True, text=True, check=False, env=SUBPROCESS_ENV)
@@ -1011,6 +1061,48 @@ def test_alg8_signatures_validate_offline_and_online():
     z.origin = origin
     z.signing_dnskey = dnskey
     on_rrsig = adns.crypto.sign_rrset(z, HashableRRset(rrset))
+    dns.dnssec.validate(rrset, on_rrsig, keyring)
+
+
+def test_alg16_signatures_validate_offline_and_online():
+    """
+    An alg-16 (Ed448) key signs an RRset via both the offline
+    (signer.rrsig_rdata) and online (crypto.sign_rrset) paths, and
+    dns.dnssec.validate accepts both. Proves the unchanged signing/serving code
+    already supports Ed448 -- unlike alg 18, no special-casing is needed.
+    """
+    import time
+    import dns.name
+    import dns.rrset
+    import dns.dnssec
+    from adns.zone import HashableRRset
+
+    priv, pub = adns.keygen.generate_key(16)
+    origin = dns.name.from_text("ed448.test.")
+    dnskey = dns.dnssec.make_dnskey(pub, 16, 257, 3)
+    dnskey_rrset = dns.rrset.from_text_list(
+        origin, 7200, "IN", "DNSKEY", [dnskey.to_text()])
+    rrset = dns.rrset.from_text("www.ed448.test.", 3600, "IN", "A",
+                                "192.0.2.1")
+    keyring = {origin: dnskey_rrset}
+
+    # Offline path.
+    now = int(time.time())
+    off_sig = adns.signer.rrsig_rdata(rrset, priv, origin, dnskey,
+                                      now - 3600, now + 172800)
+    assert off_sig.algorithm == 16
+    off_rrsig = dns.rrset.from_rdata(rrset.name, 3600, off_sig)
+    dns.dnssec.validate(rrset, off_rrsig, keyring)
+
+    # Online path via crypto.sign_rrset, using a minimal zone stand-in.
+    class _Zone:
+        pass
+    z = _Zone()
+    z.privatekey = priv
+    z.origin = origin
+    z.signing_dnskey = dnskey
+    on_rrsig = adns.crypto.sign_rrset(z, HashableRRset(rrset))
+    assert on_rrsig[0].algorithm == 16
     dns.dnssec.validate(rrset, on_rrsig, keyring)
 
 
