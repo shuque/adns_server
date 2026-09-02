@@ -3,15 +3,7 @@
 This document describes the architecture of `adns_server`: the authoritative DNS
 server (`adns/server.py`, entrypoint `adns/__main__.py`), the offline DNSSEC
 zone signer (`adns/signer.py`), and the key generator (`adns/keygen.py`), all
-built on a shared zone/DNSSEC model (`adns/zone.py`). This reflects the
-post-module-split layout (§10, now fully implemented); earlier sections that
-still describe file paths in the pre-split single-file form (`adns_server.py`,
-`signzone.py`, `adnskeygen.py`, `dnssec_util.py`) are historical and superseded
-by §10.
-
-It is a descriptive reference for the code as it stands. §10 documents the
-`adns/` package architecture and records, task by task, how the earlier
-single-file layout was split into it.
+built on a shared zone/DNSSEC model (`adns/zone.py`).
 
 Companion documents:
 - **DELEG.md** — serving-side DELEG semantics (type codes, DE-flag signaling,
@@ -27,8 +19,8 @@ Companion documents:
 
 `adns_server` is a functional, authoritative DNS server written in Python.
 Its main purpose is prototyping and protocol-conformance experimentation —
-DELEG, Compact Denial of Existence, online signing, DNS cookies — not
-production serving or high throughput.
+DELEG, Compact Denial of Existence, online signing, DNS cookies, etc. It
+is not intended for production serving or very high throughput.
 
 The package comprises three programs over one shared library, all inside the
 `adns/` package (console scripts `adns-server`/`signzone`/`adnskeygen`; see
@@ -69,8 +61,7 @@ signature cache.
 The data model is the foundation the rest of the system builds on, and it lives
 in `adns/zone.py` so both the server and the offline signer share the same
 notion of what a zone is. (`load_private_key`/`key_basename` live in
-`adns/crypto.py`; see §10.2. The pre-split `dnssec_util.py` compatibility shim
-that used to re-export these has been retired — Task 9, §10.2.)
+`adns/crypto.py`.
 
 ### 2.1 The `Zone` subclass and its `SortedDict` backend
 
@@ -835,7 +826,7 @@ server's EDNS budget; the ordinary `max_size()`/`truncate()` machinery (§7)
 handles this by setting TC and forcing TCP fallback — there is no alg-18-specific
 size handling.
 
-### 11.1 The dnspython gap
+### 11.1 dnspython limitations
 
 ML-DSA is pre-standardization, and **dnspython 2.7.0 does not implement
 algorithm 18**: `dns.dnssec.make_dnskey()`, `sign()`, and `validate()` all raise
@@ -843,8 +834,8 @@ algorithm 18**: `dns.dnssec.make_dnskey()`, `sign()`, and `validate()` all raise
 `cryptography` package (`cryptography.hazmat.primitives.asymmetric.mldsa`,
 requiring a build whose bundled OpenSSL has ML-DSA — 50.0.0 is known good).
 The implementation therefore bridges the gap by calling `cryptography` directly
-for the parts dnspython refuses, while reusing every dnspython helper that *is*
-algorithm-agnostic. Three helpers turn out to work unchanged for alg 18 —
+for the parts dnspython does not support, while reusing every dnspython helper
+that *is* algorithm-agnostic. Three helpers turn out to work unchanged for alg 18 —
 `dns.dnssec.key_id()` (keytag) and `dns.dnssec.make_ds()` (DS digest), which
 operate on the DNSKEY RDATA opaquely, and PKCS8 PEM key loading via
 `crypto.load_private_key()`.
