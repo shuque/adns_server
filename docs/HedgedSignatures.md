@@ -7,10 +7,8 @@ support. Section and algorithm numbers refer to FIPS 204 (August 2024),
 
 ## 1. Definition
 
-Hedged signing is more specific than "adding entropy to a deterministic scheme
-so signatures vary". In a hedged scheme, the per-signature secret randomness
-(the nonce, or in ML-DSA the mask) comes from a pseudorandom function of three
-inputs together:
+In a hedged scheme, the per-signature secret randomness (the nonce, or in
+ML-DSA the mask) comes from a pseudorandom function of three inputs together:
 
 - secret key material,
 - the message, and
